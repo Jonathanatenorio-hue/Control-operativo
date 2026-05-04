@@ -1623,14 +1623,12 @@ async function guardarAuditoriaAudio(actId) {
   if (tipificacion === 'MALA_LLAMADA') {
     // Verificar si HOY ya recibió sanción por mala llamada
     const hoyLocal = getFechaLocal(new Date());
-    const { data: yaHoy } = await sb.from('auditoria_audios')
-      .select('accion_tomada')
+    const { data: todasFallasA } = await sb.from('auditoria_audios')
+      .select('accion_tomada, created_at')
       .eq('agente_id', agenteId)
       .eq('tipificacion', 'MALA_LLAMADA')
-      .not('accion_tomada', 'is', null)
-      .gte('created_at', hoyLocal + 'T00:00:00')
-      .lte('created_at', hoyLocal + 'T23:59:59')
-      .maybeSingle();
+      .not('accion_tomada', 'is', null);
+    const yaHoy = (todasFallasA || []).find(f => getFechaLocal(new Date(f.created_at)) === hoyLocal);
     
     if (yaHoy) {
       // Solo registrar la mala llamada sin sanción nueva
@@ -2084,14 +2082,12 @@ async function onCambioMensajeEnviado() {
     if (capturaWhatsappContext.agente_id) {
       // Verificar si HOY ya recibió sanción
       const hoyLocal = getFechaLocal(new Date());
-      const { data: yaHoy } = await sb.from('auditoria_whatsapp')
-        .select('accion_tomada')
+      const { data: todasFallas } = await sb.from('auditoria_whatsapp')
+        .select('accion_tomada, created_at')
         .eq('agente_id', capturaWhatsappContext.agente_id)
         .eq('tipo_falla', 'NO_MENSAJE')
-        .not('accion_tomada', 'is', null)
-        .gte('created_at', hoyLocal + 'T00:00:00')
-        .lte('created_at', hoyLocal + 'T23:59:59')
-        .maybeSingle();
+        .not('accion_tomada', 'is', null);
+      const yaHoy = (todasFallas || []).find(f => getFechaLocal(new Date(f.created_at)) === hoyLocal);
       
       if (yaHoy) {
         sancionDiv.innerHTML = `
@@ -2144,14 +2140,12 @@ async function onCambioPersonalizado() {
     if (capturaWhatsappContext.agente_id) {
       // Verificar si HOY ya recibió sanción
       const hoyLocal = getFechaLocal(new Date());
-      const { data: yaHoy } = await sb.from('auditoria_whatsapp')
-        .select('accion_tomada')
+      const { data: todasFallas } = await sb.from('auditoria_whatsapp')
+        .select('accion_tomada, created_at')
         .eq('agente_id', capturaWhatsappContext.agente_id)
         .eq('tipo_falla', 'NO_PERSONALIZADO')
-        .not('accion_tomada', 'is', null)
-        .gte('created_at', hoyLocal + 'T00:00:00')
-        .lte('created_at', hoyLocal + 'T23:59:59')
-        .maybeSingle();
+        .not('accion_tomada', 'is', null);
+      const yaHoy = (todasFallas || []).find(f => getFechaLocal(new Date(f.created_at)) === hoyLocal);
       
       if (yaHoy) {
         sancionDiv.innerHTML = `
@@ -2230,14 +2224,12 @@ async function guardarCapturaWhatsapp() {
     if (ctx.agente_id) {
       // Verificar si HOY ya recibió sanción por NO_MENSAJE (solo 1 sanción por día)
       const hoyLocal = getFechaLocal(new Date());
-      const { data: yaHoy } = await sb.from('auditoria_whatsapp')
-        .select('id, accion_tomada')
+      const { data: todasFallas } = await sb.from('auditoria_whatsapp')
+        .select('id, accion_tomada, created_at')
         .eq('agente_id', ctx.agente_id)
         .eq('tipo_falla', 'NO_MENSAJE')
-        .not('accion_tomada', 'is', null)
-        .gte('created_at', hoyLocal + 'T00:00:00')
-        .lte('created_at', hoyLocal + 'T23:59:59')
-        .maybeSingle();
+        .not('accion_tomada', 'is', null);
+      const yaHoy = (todasFallas || []).find(f => getFechaLocal(new Date(f.created_at)) === hoyLocal);
       
       if (yaHoy) {
         // Ya hubo sanción hoy por mismo motivo, solo registramos sin volver a sancionar
@@ -2274,14 +2266,12 @@ async function guardarCapturaWhatsapp() {
       if (ctx.agente_id) {
         // Verificar si HOY ya recibió sanción por NO_PERSONALIZADO
         const hoyLocal = getFechaLocal(new Date());
-        const { data: yaHoy } = await sb.from('auditoria_whatsapp')
-          .select('id, accion_tomada')
+        const { data: todasFallasNP } = await sb.from('auditoria_whatsapp')
+          .select('id, accion_tomada, created_at')
           .eq('agente_id', ctx.agente_id)
           .eq('tipo_falla', 'NO_PERSONALIZADO')
-          .not('accion_tomada', 'is', null)
-          .gte('created_at', hoyLocal + 'T00:00:00')
-          .lte('created_at', hoyLocal + 'T23:59:59')
-          .maybeSingle();
+          .not('accion_tomada', 'is', null);
+        const yaHoy = (todasFallasNP || []).find(f => getFechaLocal(new Date(f.created_at)) === hoyLocal);
         
         if (yaHoy) {
           // Solo registrar sin sanción nueva
