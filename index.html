@@ -629,6 +629,7 @@ async function abrirActividad(bitacoraActividadId) {
   else if (cat.codigo === 'RECURSO_POSTVENTA') await renderModalPostVenta(act, cat);
   else if (cat.codigo === 'AUDITORIA_AUDIOS') await renderModalAudios(act, cat);
   else if (cat.codigo === 'AUDITORIA_WHATSAPP') await renderModalWhatsapp(act, cat);
+  else if (cat.codigo === 'REAUDITORIA_WHATSAPP') await renderModalReauditoria(act, cat);
   else if (cat.cuota_tipo === 'POR_AGENTE') renderModalAuditoria(act, cat, evs);
   else renderModalReporte(act, cat, evs);
   
@@ -2511,6 +2512,383 @@ async function continuarSeguimientoWhatsapp(seguimientoId, actIdHoy) {
   
   // Marcar el padre como cerrado al guardar el nuevo
   renderCapturaWhatsappModal();
+}
+
+// ============================================================================
+// RE-AUDITORÍA WHATSAPP: revisar casos sin respuesta
+// ============================================================================
+
+async function renderModalReauditoria(act, cat) {
+  document.getElementById('modal-body').innerHTML = `<div style="text-align:center; padding:40px;"><div class="loader"></div></div>`;
+  document.getElementById('modal-actions').innerHTML = `<button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>`;
+  
+  try {
+    // Filtro de días desde localStorage (default 15)
+    const filtroDias = localStorage.getItem('reaud_filtro_dias') || '15';
+    
+    // Calcular fecha límite
+    let fechaLimite = null;
+    if (filtroDias !== 'todos') {
+      const d = new Date();
+      d.setDate(d.getDate() - parseInt(filtroDias));
+      fechaLimite = d.toISOString();
+    }
+    
+    // Cargar casos sin respuesta del supervisor (no cerrados)
+    let query = sb.from('auditoria_whatsapp')
+      .select('*')
+      .eq('supervisor_id', currentSupervisor.id)
+      .eq('respuesta_cliente', 'SIN_RESPUESTA')
+      .eq('caso_cerrado', false)
+      .order('created_at', { ascending: false });
+    
+    if (fechaLimite) query = query.gte('created_at', fechaLimite);
+    
+    const { data: casosSinResp, error } = await query;
+    if (error) throw error;
+    
+    // Agrupar por agente
+    const porAgente = {};
+    (casosSinResp || []).forEach(c => {
+      if (!porAgente[c.agente_nombre]) porAgente[c.agente_nombre] = [];
+      porAgente[c.agente_nombre].push(c);
+    });
+    
+    const total = casosSinResp?.length || 0;
+    
+    // Marcar cuota objetivo automáticamente
+    if (act.cantidad_objetivo !== total) {
+      await sb.from('bitacora_actividad').update({ cantidad_objetivo: total }).eq('id', act.id);
+    }
+    
+    // Header con filtro y stats
+    const filtroLabels = { '7': 'Últimos 7 días', '15': 'Últimos 15 días', '30': 'Últimos 30 días', '60': 'Últimos 60 días', 'todos': 'Todos los casos' };
+    const headerHTML = `
+      <div style="background:rgba(168,85,247,0.08); border:1px solid rgba(168,85,247,0.3); border-radius:10px; padding:14px; margin-bottom:16px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+          <div>
+            <p style="font-size:13px; font-weight:600; color:#c4b5fd;">⚪ Casos sin respuesta del cliente</p>
+            <p style="font-size:11px; color:rgba(255,255,255,0.6); margin-top:4px;">Verifica si el cliente ya respondió y continúa el flujo o cierra el caso.</p>
+          </div>
+          <div style="display:flex; gap:6px; align-items:center;">
+            <span style="font-size:11px; color:rgba(255,255,255,0.6);">📅 Mostrar:</span>
+            <select id="reaud-filtro-dias" onchange="cambiarFiltroReauditoria()" style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; padding: 4px 8px; color: white; font-size: 11px;">
+              <option value="7" ${filtroDias === '7' ? 'selected' : ''}>Últimos 7 días</option>
+              <option value="15" ${filtroDias === '15' ? 'selected' : ''}>Últimos 15 días</option>
+              <option value="30" ${filtroDias === '30' ? 'selected' : ''}>Últimos 30 días</option>
+              <option value="60" ${filtroDias === '60' ? 'selected' : ''}>Últimos 60 días</option>
+              <option value="todos" ${filtroDias === 'todos' ? 'selected' : ''}>Todos</option>
+            </select>
+          </div>
+        </div>
+        <div style="margin-top:10px; padding-top:10px; border-top:1px solid rgba(255,255,255,0.08);">
+          <span style="font-size:24px; font-weight:700; color:#c4b5fd;">${total}</span>
+          <span style="font-size:12px; color:rgba(255,255,255,0.6); margin-left:6px;">casos pendientes (${filtroLabels[filtroDias]})</span>
+        </div>
+      </div>`;
+    
+    if (total === 0) {
+      document.getElementById('modal-body').innerHTML = `
+        ${headerHTML}
+        <div style="text-align:center; padding:40px;">
+          <h3 style="font-size:16px; margin-bottom:8px; color:#6ee7b7;">✅ Sin casos pendientes</h3>
+          <p style="font-size:13px; color:rgba(255,255,255,0.6);">No hay casos sin respuesta en este rango. ¡Buen trabajo!</p>
+          <button class="btn btn-success" style="margin-top:20px;" onclick="marcarReauditoriaCompleta('${act.id}')">Marcar actividad como completada ✓</button>
+        </div>`;
+      return;
+    }
+    
+    // Render por agente
+    let casosHTML = '';
+    for (const agente in porAgente) {
+      const lista = porAgente[agente];
+      casosHTML += `
+        <div style="margin-bottom:18px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; padding-bottom:6px; border-bottom:1px solid rgba(255,255,255,0.08);">
+            <p style="font-size:13px; font-weight:700; color:rgba(255,255,255,0.9);">👤 ${agente}</p>
+            <span style="font-size:11px; color:rgba(255,255,255,0.6);">${lista.length} caso(s)</span>
+          </div>
+          ${lista.map(c => renderTarjetaReauditoria(c, act.id)).join('')}
+        </div>`;
+    }
+    
+    document.getElementById('modal-body').innerHTML = `
+      ${headerHTML}
+      <div style="max-height:600px; overflow-y:auto;">${casosHTML}</div>
+    `;
+  } catch (err) {
+    console.error(err);
+    document.getElementById('modal-body').innerHTML = `<div class="error-msg show">Error: ${err.message}</div>`;
+  }
+}
+
+function renderTarjetaReauditoria(c, actId) {
+  const fechaCreacion = new Date(c.created_at).toLocaleDateString('es-MX', {day:'2-digit', month:'short', year:'numeric'});
+  const diasTranscurridos = Math.floor((Date.now() - new Date(c.created_at).getTime()) / (1000 * 60 * 60 * 24));
+  
+  let alertaAntiguedad = '';
+  if (diasTranscurridos > 30) alertaAntiguedad = '<span style="color:#fca5a5; font-size:10px;"> · 🚨 Muy antiguo</span>';
+  else if (diasTranscurridos > 15) alertaAntiguedad = '<span style="color:#fbbf24; font-size:10px;"> · ⚠️ Antiguo</span>';
+  
+  return `
+    <div style="background:rgba(168,85,247,0.04); border:1px solid rgba(168,85,247,0.25); border-radius:10px; padding:12px 14px; margin-bottom:6px;">
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:6px;">
+        <div style="flex:1;">
+          <div style="font-weight:600; font-size:13px;">${c.cliente_nombre || '👤 Cliente'}</div>
+          <div style="font-size:11px; color:rgba(255,255,255,0.6);">📞 ${c.dn_cliente} · ${c.plan_actual}</div>
+          <div style="font-size:10px; color:rgba(255,255,255,0.5); margin-top:2px;">Mensaje original: ${fechaCreacion} · Hace ${diasTranscurridos} día(s)${alertaAntiguedad}</div>
+        </div>
+      </div>
+      <button class="btn" style="width:100%; margin-top:6px; font-size:11px; padding:6px;" onclick="abrirVerificacionRespuesta('${c.id}', '${actId}')">📞 Verificar respuesta</button>
+    </div>`;
+}
+
+function cambiarFiltroReauditoria() {
+  const val = document.getElementById('reaud-filtro-dias').value;
+  localStorage.setItem('reaud_filtro_dias', val);
+  if (currentEditActividad) {
+    renderModalReauditoria(currentEditActividad.act, currentEditActividad.cat);
+  }
+}
+
+async function marcarReauditoriaCompleta(actId) {
+  await sb.from('bitacora_actividad').update({
+    estado: 'COMPLETADA', cantidad_realizada: 0, cantidad_objetivo: 0,
+    porcentaje_completado: 100, comentarios: 'Sin casos sin respuesta pendientes'
+  }).eq('id', actId);
+  closeModal();
+  await loadActivities();
+}
+
+// ============================================================================
+// SUB-MODAL: verificar respuesta del cliente
+// ============================================================================
+let verificacionContext = null;
+
+async function abrirVerificacionRespuesta(casoId, actIdHoy) {
+  const { data: caso } = await sb.from('auditoria_whatsapp').select('*').eq('id', casoId).single();
+  verificacionContext = { caso, actIdHoy };
+  
+  const fechaOriginal = new Date(caso.created_at).toLocaleDateString('es-MX', {day:'2-digit', month:'short', year:'numeric'});
+  
+  document.getElementById('modal-body').innerHTML = `
+    <div style="background:rgba(168,85,247,0.08); border:1px solid rgba(168,85,247,0.3); border-radius:10px; padding:12px; margin-bottom:16px;">
+      <div style="font-weight:600; font-size:14px; margin-bottom:4px;">${caso.cliente_nombre || '👤 Cliente'}</div>
+      <div style="font-size:12px; color:rgba(255,255,255,0.7);">📞 ${caso.dn_cliente} · ${caso.plan_actual}</div>
+      <div style="font-size:11px; color:rgba(255,255,255,0.5); margin-top:4px;">Agente: ${caso.agente_nombre} · Mensaje original: ${fechaOriginal}</div>
+    </div>
+    
+    <div class="form-group">
+      <label>¿Cuál es el estado actual del cliente?</label>
+      <select id="reaud-respuesta" onchange="onCambioRespReaud()">
+        <option value="">-- Selecciona --</option>
+        <option value="POSITIVA">🟢 Ya respondió positivamente</option>
+        <option value="NEGATIVA">🔴 Ya respondió negativamente</option>
+        <option value="SIN_RESPUESTA">⚪ Sigue sin responder</option>
+        <option value="AGOTADO">🚫 Cerrar como agotado (no insistir más)</option>
+      </select>
+    </div>
+    
+    <div id="reaud-positiva-block" style="display:none;">
+      <div style="background:rgba(16,185,129,0.06); border:1px solid rgba(16,185,129,0.3); border-radius:10px; padding:12px; margin-bottom:12px;">
+        <p style="font-size:13px; font-weight:600; margin-bottom:8px; color:#6ee7b7;">🟢 Cliente respondió positivamente</p>
+        <div class="form-group" style="margin-bottom:8px;">
+          <label>Tipificación final</label>
+          <select id="reaud-tip" onchange="onCambioTipReaud()">
+            <option value="">-- Selecciona --</option>
+            <option value="VENTA">🎉 Venta cerrada</option>
+            <option value="SEGUIMIENTO">🔄 Seguimiento</option>
+            <option value="PERDIDA">💔 Pérdida</option>
+          </select>
+        </div>
+        
+        <div id="reaud-venta" style="display:none;">
+          <div class="form-group" style="margin-bottom:0;">
+            <label>Folio de la venta</label>
+            <input type="text" id="reaud-folio" placeholder="Ej: ABC123456" style="text-transform:uppercase;">
+            <p style="font-size:11px; color:rgba(255,255,255,0.5); margin-top:4px;">📋 Se validará cuando se actualice el informe-semanal.</p>
+          </div>
+        </div>
+        
+        <div id="reaud-seg" style="display:none;">
+          <div class="form-group" style="margin-bottom:8px;">
+            <label>Motivo del seguimiento</label>
+            <textarea id="reaud-motivo-seg" rows="2" placeholder="Por qué no cerró ahora..."></textarea>
+          </div>
+          <div class="form-group" style="margin-bottom:0;">
+            <label>📅 Próximo contacto</label>
+            <input type="date" id="reaud-fecha-prox" min="${getFechaLocal(new Date())}">
+          </div>
+        </div>
+        
+        <div id="reaud-perd" style="display:none;">
+          <div class="form-group" style="margin-bottom:0;">
+            <label>Motivo de la pérdida</label>
+            <textarea id="reaud-motivo-perd" rows="2" placeholder="Por qué se perdió..."></textarea>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <div id="reaud-negativa-info" style="display:none;">
+      <div style="background:rgba(239,68,68,0.06); border:1px solid rgba(239,68,68,0.25); border-radius:10px; padding:12px; margin-bottom:12px;">
+        <p style="font-size:13px; color:#fca5a5;">🔴 El caso se cerrará. El cliente no está interesado.</p>
+      </div>
+    </div>
+    
+    <div id="reaud-sigue-info" style="display:none;">
+      <div style="background:rgba(168,85,247,0.06); border:1px solid rgba(168,85,247,0.25); border-radius:10px; padding:12px; margin-bottom:12px;">
+        <p style="font-size:13px; color:#c4b5fd;">⚪ El caso sigue pendiente. Reaparecerá mañana en esta misma actividad.</p>
+      </div>
+    </div>
+    
+    <div id="reaud-agotado-info" style="display:none;">
+      <div style="background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.15); border-radius:10px; padding:12px; margin-bottom:12px;">
+        <p style="font-size:13px; color:rgba(255,255,255,0.7);">🚫 El caso se cerrará definitivamente. No se volverá a contactar.</p>
+        <div class="form-group" style="margin-top:8px; margin-bottom:0;">
+          <label>Motivo del cierre (opcional)</label>
+          <textarea id="reaud-motivo-agotado" rows="2" placeholder="Ej: Tras 30 días sin respuesta, cliente no muestra interés"></textarea>
+        </div>
+      </div>
+    </div>
+    
+    <div class="form-group">
+      <label>Notas / observaciones</label>
+      <textarea id="reaud-notas" rows="2" placeholder="Comentarios adicionales..."></textarea>
+    </div>
+  `;
+  
+  document.getElementById('modal-actions').innerHTML = `
+    <button class="btn btn-secondary" onclick="renderModalReauditoria(currentEditActividad.act, currentEditActividad.cat)">← Volver</button>
+    <button class="btn btn-success" onclick="guardarVerificacionReauditoria()">💾 Guardar</button>
+  `;
+}
+
+function onCambioRespReaud() {
+  const val = document.getElementById('reaud-respuesta').value;
+  document.getElementById('reaud-positiva-block').style.display = val === 'POSITIVA' ? 'block' : 'none';
+  document.getElementById('reaud-negativa-info').style.display = val === 'NEGATIVA' ? 'block' : 'none';
+  document.getElementById('reaud-sigue-info').style.display = val === 'SIN_RESPUESTA' ? 'block' : 'none';
+  document.getElementById('reaud-agotado-info').style.display = val === 'AGOTADO' ? 'block' : 'none';
+}
+
+function onCambioTipReaud() {
+  const val = document.getElementById('reaud-tip').value;
+  document.getElementById('reaud-venta').style.display = val === 'VENTA' ? 'block' : 'none';
+  document.getElementById('reaud-seg').style.display = val === 'SEGUIMIENTO' ? 'block' : 'none';
+  document.getElementById('reaud-perd').style.display = val === 'PERDIDA' ? 'block' : 'none';
+}
+
+async function guardarVerificacionReauditoria() {
+  const ctx = verificacionContext;
+  const respuesta = document.getElementById('reaud-respuesta').value;
+  const notas = document.getElementById('reaud-notas').value.trim();
+  
+  if (!respuesta) { alert('Selecciona el estado del cliente'); return; }
+  
+  const padre = ctx.caso;
+  const updates = {};
+  let casoCerrado = false;
+  let nuevoRegistro = null;  // si genera continuación
+  
+  if (respuesta === 'POSITIVA') {
+    const tip = document.getElementById('reaud-tip').value;
+    if (!tip) { alert('Selecciona la tipificación'); return; }
+    
+    // Actualizar el caso original con la nueva info
+    updates.respuesta_cliente = 'POSITIVA';
+    updates.tipificacion_final = tip;
+    
+    if (tip === 'VENTA') {
+      const folio = document.getElementById('reaud-folio').value.trim().toUpperCase();
+      if (!folio) { alert('Captura el folio de la venta'); return; }
+      updates.folio_venta = folio;
+      updates.validacion_folio_venta = 'PENDIENTE';
+      updates.caso_cerrado = true;
+      casoCerrado = true;
+    } else if (tip === 'PERDIDA') {
+      const motivo = document.getElementById('reaud-motivo-perd').value.trim();
+      if (!motivo) { alert('Captura el motivo de la pérdida'); return; }
+      updates.motivo_perdida = motivo;
+      updates.caso_cerrado = true;
+      casoCerrado = true;
+    } else if (tip === 'SEGUIMIENTO') {
+      const motivo = document.getElementById('reaud-motivo-seg').value.trim();
+      const fecha = document.getElementById('reaud-fecha-prox').value;
+      if (!motivo) { alert('Captura el motivo'); return; }
+      if (!fecha) { alert('Selecciona la fecha de próximo contacto'); return; }
+      updates.motivo_seguimiento = motivo;
+      updates.fecha_proximo_seguimiento = fecha;
+      updates.caso_cerrado = false;
+      updates.estado = 'EN_SEGUIMIENTO';
+    }
+  } else if (respuesta === 'NEGATIVA') {
+    updates.respuesta_cliente = 'NEGATIVA';
+    updates.caso_cerrado = true;
+    casoCerrado = true;
+  } else if (respuesta === 'SIN_RESPUESTA') {
+    // Solo actualiza notas y deja el caso abierto
+    // No cambiamos respuesta_cliente, sigue como SIN_RESPUESTA
+  } else if (respuesta === 'AGOTADO') {
+    updates.caso_cerrado = true;
+    updates.estado = 'CERRADA';
+    const motivoAg = document.getElementById('reaud-motivo-agotado').value.trim();
+    if (motivoAg) updates.motivo_perdida = `[Agotado] ${motivoAg}`;
+    casoCerrado = true;
+  }
+  
+  if (notas) {
+    updates.hallazgos = (padre.hallazgos ? padre.hallazgos + '\n' : '') + `[Re-auditoría ${getFechaLocal(new Date())}] ${notas}`;
+  }
+  
+  // Aplicar updates al caso original
+  if (Object.keys(updates).length > 0) {
+    const { error } = await sb.from('auditoria_whatsapp').update(updates).eq('id', padre.id);
+    if (error) { alert('Error: ' + error.message); return; }
+  }
+  
+  // Crear registro de re-auditoría en la actividad de hoy (para contar la cuota)
+  const { error: errReg } = await sb.from('auditoria_whatsapp').insert({
+    bitacora_actividad_id: ctx.actIdHoy,
+    supervisor_id: currentSupervisor.id,
+    tipificacion_id: padre.tipificacion_id,
+    agente_id: padre.agente_id,
+    agente_nombre: padre.agente_nombre,
+    dn_cliente: padre.dn_cliente,
+    cliente_nombre: padre.cliente_nombre,
+    plan_actual: padre.plan_actual,
+    fecha_cc: padre.fecha_cc,
+    mensaje_enviado: true,
+    mensaje_personalizado: true,
+    respuesta_cliente: respuesta === 'AGOTADO' ? 'NEGATIVA' : (respuesta === 'SIN_RESPUESTA' ? 'SIN_RESPUESTA' : respuesta),
+    tipificacion_final: updates.tipificacion_final || null,
+    motivo_seguimiento: updates.motivo_seguimiento || null,
+    motivo_perdida: updates.motivo_perdida || null,
+    fecha_proximo_seguimiento: updates.fecha_proximo_seguimiento || null,
+    folio_venta: updates.folio_venta || null,
+    validacion_folio_venta: updates.validacion_folio_venta || null,
+    hallazgos: notas || `Re-auditoría: ${respuesta}`,
+    caso_cerrado: casoCerrado,
+    estado: updates.estado || 'ACTIVA',
+    caso_padre_id: padre.id,
+    num_intento: (padre.num_intento || 1) + 1
+  });
+  
+  if (errReg) console.warn('No se pudo insertar registro de re-auditoría:', errReg);
+  
+  // Actualizar contador en la actividad
+  const { count } = await sb.from('auditoria_whatsapp').select('*', { count: 'exact', head: true }).eq('bitacora_actividad_id', ctx.actIdHoy);
+  const { data: actUpdated } = await sb.from('bitacora_actividad').select('cantidad_objetivo').eq('id', ctx.actIdHoy).single();
+  const total = actUpdated?.cantidad_objetivo || 0;
+  let nuevoEstado = count === 0 ? 'PENDIENTE' : 'PARCIAL';
+  if (count >= total && total > 0) nuevoEstado = 'COMPLETADA';
+  await sb.from('bitacora_actividad').update({
+    cantidad_realizada: count, estado: nuevoEstado,
+    porcentaje_completado: total > 0 ? (count/total)*100 : 0
+  }).eq('id', ctx.actIdHoy);
+  
+  await renderModalReauditoria(currentEditActividad.act, currentEditActividad.cat);
+  await loadActivities();
 }
 
 function renderModalReporte(act, cat, evs) {
