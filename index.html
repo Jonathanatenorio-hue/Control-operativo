@@ -358,7 +358,7 @@ async function loadActividadesCatalogo() {
 // BITÁCORA DEL DÍA
 // ============================================================================
 async function loadBitacoraHoy() {
-  const hoy = new Date().toISOString().split('T')[0];
+  const hoy = getFechaLocal(new Date());
   const diaSemana = DEMO_MODE ? 1 : new Date().getDay(); // En demo, simulamos lunes
   
   // Domingo (no aplica en modo demo)
@@ -482,7 +482,7 @@ async function confirmarAsistencia() {
   
   try {
     // Insertar asistencias
-    const hoy = new Date().toISOString().split('T')[0];
+    const hoy = getFechaLocal(new Date());
     const inserts = agentesActivos.map(ag => ({
       bitacora_id: currentBitacora.id,
       agente_id: ag.id,
@@ -719,6 +719,14 @@ function renderModalAuditoria(act, cat, evs) {
 // ============================================================================
 
 // Calcular fecha del día anterior operativo (lunes → sábado)
+// Usa fecha LOCAL (no UTC) para evitar problemas de timezone
+function getFechaLocal(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 function getFechaVentas() {
   const hoy = new Date();
   const ayer = new Date(hoy);
@@ -735,7 +743,7 @@ function getFechaVentas() {
       ayer.setDate(hoy.getDate() - 1);
     }
   }
-  return ayer.toISOString().split('T')[0];
+  return getFechaLocal(ayer);
 }
 
 // Mapeo nombre supervisor bitácora → nombres en plantilla (vía mapeo_supervisores)
