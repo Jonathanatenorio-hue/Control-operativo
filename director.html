@@ -969,17 +969,18 @@ async function cargarCsvTipificacion() {
     const candidatosNuevos = candidatos.filter(c => !clavesExistentes.has(`${c.cuenta}|${c.dn}`));
     logCsv(`   ${candidatosNuevos.length} nuevos · ${candidatos.length - candidatosNuevos.length} ya existían (se omiten)`, '');
     
-    // 7. Insertar SOLO los nuevos
+    // 7. Insertar SOLO los nuevos (con upsert para tolerar duplicados)
     logCsv('7. Insertando candidatos nuevos...', 'info');
     const BATCH = 100;
     let insertados = 0, errores = 0;
     for (let i = 0; i < candidatosNuevos.length; i += BATCH) {
       const lote = candidatosNuevos.slice(i, i + BATCH);
-      const { error } = await sbBitacora.from('tipificacion_diaria').insert(lote);
+      const { error } = await sbBitacora.from('tipificacion_diaria')
+        .upsert(lote, { onConflict: 'cuenta,dn,fecha_cc,ubicacion', ignoreDuplicates: true });
       if (error) { errores++; logCsv(`   ✗ Error lote ${i/BATCH + 1}: ${error.message}`, 'error'); }
       else insertados += lote.length;
     }
-    logCsv(`   ✓ ${insertados} registros insertados`, 'success');
+    logCsv(`   ✓ ${insertados} registros procesados`, 'success');
     
     // 8. Re-procesar selección inteligente (mantiene capturados, completa hasta 5)
     logCsv('8. Recalculando selección de auditoría...', 'info');
