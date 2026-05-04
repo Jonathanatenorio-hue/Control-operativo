@@ -249,6 +249,32 @@
     </div>
     
     <div class="panel">
+      <div class="sync-zone" style="background: linear-gradient(135deg, rgba(168,85,247,0.1), rgba(168,85,247,0.04)); border: 1px solid rgba(168,85,247,0.4);">
+        <h3>📥 Cargar reporte de tipificación (WhatsApp)</h3>
+        <p>Sube el CSV de tipificación del día anterior. El sistema seleccionará automáticamente 5 casos aleatorios por agente con calificación <strong>"NO CONTACTO / AGENDA BUZON"</strong> excluyendo planes bajos.<br>
+           Cárgalo en la noche o antes de las 9:30 AM.</p>
+        
+        <div style="background: rgba(0,0,0,0.2); border-radius: 10px; padding: 16px; margin: 16px 0; text-align: left;">
+          <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:12px;">
+            <label style="font-size:12px; font-weight:600; color:rgba(255,255,255,0.7);">Sede:</label>
+            <select id="csv-sede" style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 8px 12px; color: white; font-size: 13px;">
+              <option value="CC2">CC2 Puebla</option>
+              <option value="JV">JV CDMX</option>
+            </select>
+            
+            <label style="font-size:12px; font-weight:600; color:rgba(255,255,255,0.7); margin-left:12px;">Fecha del reporte:</label>
+            <input type="date" id="csv-fecha" style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 8px 12px; color: white; font-size: 13px;">
+          </div>
+          
+          <input type="file" id="csv-file" accept=".csv" style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 10px; color: white; font-size: 13px; width: 100%;">
+        </div>
+        
+        <button class="btn" id="csv-cargar-btn" onclick="cargarCsvTipificacion()">Procesar y cargar</button>
+        <div class="log-area" id="log-area-csv" style="display:none;"></div>
+      </div>
+    </div>
+    
+    <div class="panel">
       <h2>Vista previa por supervisor</h2>
       <p class="subtitle">Distribución actual de agentes activos en bitácora.</p>
       <div id="supervisor-table"></div>
@@ -690,6 +716,329 @@ async function validarFolios() {
     btn.innerHTML = 'Validar folios pendientes';
   }
 }
+
+// ============================================================================
+// CARGA DE CSV DE TIPIFICACIÓN (WHATSAPP)
+// ============================================================================
+let logAreaCsv = null;
+
+function logCsv(msg, tipo = '') {
+  if (!logAreaCsv) {
+    logAreaCsv = document.getElementById('log-area-csv');
+    logAreaCsv.style.display = 'block';
+    logAreaCsv.innerHTML = '';
+  }
+  const line = document.createElement('div');
+  line.className = 'log-line ' + tipo;
+  line.textContent = msg;
+  logAreaCsv.appendChild(line);
+  logAreaCsv.scrollTop = logAreaCsv.scrollHeight;
+}
+
+// Parser CSV simple que maneja comillas dobles
+function parseCSV(text) {
+  const lines = text.split(/\r?\n/);
+  const result = [];
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const row = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQuotes && line[i+1] === '"') { current += '"'; i++; }
+        else inQuotes = !inQuotes;
+      } else if (ch === ',' && !inQuotes) {
+        row.push(current); current = '';
+      } else {
+        current += ch;
+      }
+    }
+    row.push(current);
+    result.push(row);
+  }
+  return result;
+}
+
+// Leer archivo con detección de encoding
+function leerArchivoConEncoding(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      // Probar primero con UTF-8 (lo más común si viene editado)
+      let text = e.target.result;
+      // Si vemos caracteres raros típicos de doble decodificación, intentamos como bytes
+      resolve(text);
+    };
+    reader.onerror = reject;
+    // Leer como texto Windows-1252 (es ISO-8859 compatible y maneja español)
+    reader.readAsText(file, 'windows-1252');
+  });
+}
+
+async function cargarCsvTipificacion() {
+  const fileInput = document.getElementById('csv-file');
+  const sede = document.getElementById('csv-sede').value;
+  const fecha = document.getElementById('csv-fecha').value;
+  const btn = document.getElementById('csv-cargar-btn');
+  
+  if (!fileInput.files || fileInput.files.length === 0) {
+    alert('Selecciona un archivo CSV');
+    return;
+  }
+  if (!fecha) {
+    alert('Selecciona la fecha del reporte (día anterior laboral que se va a auditar)');
+    return;
+  }
+  
+  if (!confirm(`¿Procesar CSV de ${sede} para la fecha ${fecha}? Esto reemplazará registros previos del mismo día/sede.`)) return;
+  
+  btn.disabled = true;
+  btn.innerHTML = '<span class="loader"></span> Procesando...';
+  logAreaCsv = null;
+  
+  try {
+    logCsv('▶ Iniciando carga de CSV...', 'info');
+    logCsv('───────────────────────────────────────', '');
+    
+    // 1. Leer y parsear archivo
+    logCsv('1. Leyendo archivo...', 'info');
+    const text = await leerArchivoConEncoding(fileInput.files[0]);
+    const rows = parseCSV(text);
+    if (rows.length < 2) throw new Error('CSV vacío o inválido');
+    
+    const headers = rows[0].map(h => h.trim());
+    const data = rows.slice(1);
+    logCsv(`   ${data.length} filas leídas (sin contar encabezado)`, 'success');
+    
+    // Identificar índices de columnas relevantes
+    const colIdx = {
+      id_cc: headers.indexOf('ID CC'),
+      campania: headers.indexOf('Campaña CC'),
+      cuenta: headers.indexOf('cuenta'),
+      dn: headers.indexOf('dn'),
+      cliente: headers.indexOf('cliente'),
+      fecha_renov: headers.indexOf('fecha_para_renovacion'),
+      plan: headers.indexOf('plan_actual'),
+      ciudad: headers.indexOf('ciudad'),
+      fecha_cc: headers.indexOf('Fecha_CC'),
+      gestor: headers.indexOf('Gestor_CC'),  // este es el AGENTE
+      estatus: headers.indexOf('Estatus_CC'),
+      calificacion: headers.indexOf('Calificacion_CC'),
+      obs: headers.indexOf('Obs_CC'),
+      grabacion: headers.indexOf('Grabacion_CC'),
+      supervisor: headers.indexOf('Clave_Int_Agente')  // este es el SUPERVISOR
+    };
+    
+    // Validar que existan las columnas críticas
+    if (colIdx.calificacion === -1 || colIdx.gestor === -1 || colIdx.supervisor === -1 || colIdx.fecha_cc === -1 || colIdx.plan === -1) {
+      throw new Error('CSV no tiene las columnas esperadas (Calificacion_CC, Gestor_CC, Clave_Int_Agente, Fecha_CC, plan_actual)');
+    }
+    
+    // 2. Cargar planes excluidos
+    logCsv('2. Cargando catálogo de planes excluidos...', 'info');
+    const { data: planesExcl } = await sbBitacora.from('planes_excluidos_whatsapp').select('nombre_plan').eq('activo', true);
+    const planesExcluidosSet = new Set((planesExcl || []).map(p => p.nombre_plan.trim().toLowerCase()));
+    logCsv(`   ${planesExcluidosSet.size} planes excluidos en catálogo`, 'success');
+    
+    // 3. Cargar supervisores y mapeo
+    logCsv('3. Cargando supervisores y mapeo...', 'info');
+    const { data: sups } = await sbBitacora.from('supervisores').select('id, nombre, ubicacion').eq('activo', true).eq('ubicacion', sede);
+    const { data: mapeo } = await sbBitacora.from('mapeo_supervisores').select('nombre_origen, supervisor_id');
+    
+    const supMap = {};
+    sups.forEach(s => { supMap[s.nombre.toLowerCase().trim()] = s; });
+    (mapeo || []).forEach(m => {
+      const sup = sups.find(s => s.id === m.supervisor_id);
+      if (sup) supMap[m.nombre_origen.toLowerCase().trim()] = sup;
+    });
+    logCsv(`   ${sups.length} supervisores activos en ${sede}`, 'success');
+    
+    // 4. Filtrar registros válidos
+    logCsv('4. Filtrando registros candidatos...', 'info');
+    logCsv(`   - Calificación: NO CONTACTO / AGENDA BUZON`, '');
+    logCsv(`   - Fecha_CC: ${fecha}`, '');
+    logCsv(`   - Plan NO en lista de exclusión`, '');
+    
+    const candidatos = [];
+    let stats = {
+      total: data.length,
+      sinFecha: 0,
+      fechaIncorrecta: 0,
+      calificacionNoOk: 0,
+      planExcluido: 0,
+      sinSupervisor: 0,
+      validos: 0
+    };
+    
+    for (const row of data) {
+      const calificacion = (row[colIdx.calificacion] || '').trim();
+      const planActual = (row[colIdx.plan] || '').trim();
+      const fechaCcRaw = (row[colIdx.fecha_cc] || '').trim();
+      const supervisorRaw = (row[colIdx.supervisor] || '').trim();
+      
+      // Validar fecha
+      if (!fechaCcRaw) { stats.sinFecha++; continue; }
+      const fechaCc = fechaCcRaw.split(' ')[0]; // "2026-05-02 10:08:02" → "2026-05-02"
+      if (fechaCc !== fecha) { stats.fechaIncorrecta++; continue; }
+      
+      // Validar calificación
+      const califUpper = calificacion.toUpperCase();
+      if (!califUpper.includes('NO CONTACTO') && !califUpper.includes('AGENDA BUZON') && !califUpper.includes('AGENDA / BUZON')) {
+        stats.calificacionNoOk++;
+        continue;
+      }
+      
+      // Validar plan no excluido
+      if (planesExcluidosSet.has(planActual.toLowerCase())) {
+        stats.planExcluido++;
+        continue;
+      }
+      
+      // Validar supervisor existe en bitácora
+      const supervisor = supMap[supervisorRaw.toLowerCase()];
+      if (!supervisor) {
+        stats.sinSupervisor++;
+        continue;
+      }
+      
+      candidatos.push({
+        fecha_cc: fechaCc,
+        id_cc: row[colIdx.id_cc] || '',
+        campania_cc: row[colIdx.campania] || '',
+        cuenta: row[colIdx.cuenta] || '',
+        dn: row[colIdx.dn] || '',
+        cliente_nombre: row[colIdx.cliente] || '',
+        fecha_renovacion: row[colIdx.fecha_renov] || '',
+        plan_actual: planActual,
+        ciudad: row[colIdx.ciudad] || '',
+        agente_nombre: (row[colIdx.gestor] || '').trim(),
+        estatus_cc: row[colIdx.estatus] || '',
+        calificacion_cc: calificacion,
+        obs_cc: row[colIdx.obs] || '',
+        grabacion_cc: row[colIdx.grabacion] || '',
+        supervisor_nombre: supervisorRaw,
+        ubicacion: sede,
+        cargado_por_coordinador_id: currentUser.id,
+        es_candidato_audit: true,
+        fue_seleccionado: false
+      });
+      stats.validos++;
+    }
+    
+    logCsv(`   ✓ ${stats.validos} registros válidos`, 'success');
+    if (stats.fechaIncorrecta > 0) logCsv(`   • ${stats.fechaIncorrecta} con fecha distinta`, '');
+    if (stats.calificacionNoOk > 0) logCsv(`   • ${stats.calificacionNoOk} con calificación distinta`, '');
+    if (stats.planExcluido > 0) logCsv(`   • ${stats.planExcluido} con plan excluido`, '');
+    if (stats.sinSupervisor > 0) logCsv(`   ⚠ ${stats.sinSupervisor} sin supervisor mapeado`, 'warning');
+    
+    if (candidatos.length === 0) {
+      logCsv('✗ No hay registros válidos para procesar', 'error');
+      btn.disabled = false;
+      btn.innerHTML = 'Procesar y cargar';
+      return;
+    }
+    
+    // 5. Agrupar por agente y seleccionar 5 random
+    logCsv('5. Seleccionando 5 casos aleatorios por agente...', 'info');
+    
+    const porAgente = {};
+    candidatos.forEach(c => {
+      const key = c.agente_nombre + '||' + c.supervisor_nombre;
+      if (!porAgente[key]) porAgente[key] = [];
+      porAgente[key].push(c);
+    });
+    
+    const alertasMalaTipificacion = [];
+    
+    for (const key in porAgente) {
+      const grupo = porAgente[key];
+      const [agente, supervisor] = key.split('||');
+      
+      if (grupo.length < 5) {
+        alertasMalaTipificacion.push({ agente, supervisor, total: grupo.length });
+        // Marcar todos como seleccionados (los pocos que hay)
+        grupo.forEach(g => g.fue_seleccionado = true);
+      } else {
+        // Selección aleatoria de 5
+        const shuffled = [...grupo].sort(() => Math.random() - 0.5);
+        const seleccionados = shuffled.slice(0, 5);
+        const setSeleccionados = new Set(seleccionados.map(s => s.dn + '|' + s.fecha_cc));
+        grupo.forEach(g => {
+          g.fue_seleccionado = setSeleccionados.has(g.dn + '|' + g.fecha_cc);
+        });
+      }
+    }
+    
+    const totalSeleccionados = candidatos.filter(c => c.fue_seleccionado).length;
+    logCsv(`   ✓ ${totalSeleccionados} casos seleccionados para auditar`, 'success');
+    logCsv(`   • ${Object.keys(porAgente).length} agentes con candidatos`, '');
+    
+    if (alertasMalaTipificacion.length > 0) {
+      logCsv('───────────────────────────────────────', '');
+      logCsv('⚠ ALERTAS DE RIESGO DE MALA TIPIFICACIÓN:', 'warning');
+      alertasMalaTipificacion.forEach(a => {
+        logCsv(`   • ${a.agente} (sup. ${a.supervisor}): solo ${a.total} caso(s)`, 'warning');
+      });
+      logCsv('   → Revisar si estos agentes están tipificando bien los casos.', 'warning');
+    }
+    
+    // 6. Borrar registros previos del mismo día y sede
+    logCsv('───────────────────────────────────────', '');
+    logCsv('6. Limpiando registros previos del mismo día...', 'info');
+    const { error: errDel } = await sbBitacora.from('tipificacion_diaria')
+      .delete()
+      .eq('fecha_cc', fecha)
+      .eq('ubicacion', sede);
+    if (errDel) logCsv(`   ⚠ Error: ${errDel.message}`, 'warning');
+    
+    // 7. Insertar candidatos en lotes
+    logCsv('7. Insertando candidatos en base de datos...', 'info');
+    const BATCH = 100;
+    let insertados = 0, errores = 0;
+    for (let i = 0; i < candidatos.length; i += BATCH) {
+      const lote = candidatos.slice(i, i + BATCH);
+      const { error } = await sbBitacora.from('tipificacion_diaria').insert(lote);
+      if (error) { errores++; logCsv(`   ✗ Error lote ${i/BATCH + 1}: ${error.message}`, 'error'); }
+      else insertados += lote.length;
+    }
+    logCsv(`   ✓ ${insertados} registros insertados`, 'success');
+    
+    // 8. Resumen final
+    logCsv('───────────────────────────────────────', '');
+    logCsv('✅ Carga completada', 'success');
+    logCsv(`   • ${stats.total} filas procesadas`, '');
+    logCsv(`   • ${stats.validos} registros válidos`, 'success');
+    logCsv(`   • ${totalSeleccionados} seleccionados para auditar`, 'success');
+    logCsv(`   • ${Object.keys(porAgente).length} agentes`, '');
+    if (alertasMalaTipificacion.length > 0) logCsv(`   ⚠ ${alertasMalaTipificacion.length} alertas de mala tipificación`, 'warning');
+    
+  } catch (err) {
+    logCsv(`✗ Error: ${err.message}`, 'error');
+    console.error(err);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = 'Procesar y cargar';
+  }
+}
+
+// Default fecha al día anterior cuando se abre la pantalla
+window.addEventListener('DOMContentLoaded', () => {
+  setTimeout(() => {
+    const fechaInput = document.getElementById('csv-fecha');
+    if (fechaInput && !fechaInput.value) {
+      const ayer = new Date();
+      const dow = ayer.getDay();
+      // Si hoy es lunes (1), fecha = sábado (resto 2)
+      ayer.setDate(ayer.getDate() - (dow === 1 ? 2 : 1));
+      const yyyy = ayer.getFullYear();
+      const mm = String(ayer.getMonth() + 1).padStart(2, '0');
+      const dd = String(ayer.getDate()).padStart(2, '0');
+      fechaInput.value = `${yyyy}-${mm}-${dd}`;
+    }
+  }, 200);
+});
 
 // ============================================================================
 // SESSION
