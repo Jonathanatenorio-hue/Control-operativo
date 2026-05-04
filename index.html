@@ -627,6 +627,7 @@ async function abrirActividad(bitacoraActividadId) {
   
   if (cat.tipo === 'HABITO') renderModalHabito(act, cat);
   else if (cat.codigo === 'RECURSO_POSTVENTA') await renderModalPostVenta(act, cat);
+  else if (cat.codigo === 'AUDITORIA_AUDIOS') await renderModalAudios(act, cat);
   else if (cat.cuota_tipo === 'POR_AGENTE') renderModalAuditoria(act, cat, evs);
   else renderModalReporte(act, cat, evs);
   
@@ -1304,6 +1305,398 @@ async function guardarCapturaPostventa() {
   
   // Volver al listado
   await renderModalPostVenta(currentEditActividad.act, currentEditActividad.cat);
+  await loadActivities();
+}
+
+// ============================================================================
+// AUDITORÍA DE AUDIOS: modal con escalamiento progresivo
+// ============================================================================
+
+const NIVEL_NOMBRES = {
+  'RETROALIMENTACION': 'Retroalimentación',
+  'CARTA_COMPROMISO': 'Carta compromiso',
+  'ACTA_ADMINISTRATIVA': 'Acta administrativa',
+  'BAJA': 'Baja'
+};
+
+const NIVEL_COLORES = {
+  'RETROALIMENTACION': { bg: 'rgba(245,158,11,0.15)', text: '#fbbf24', icon: '⚠️' },
+  'CARTA_COMPROMISO': { bg: 'rgba(245,158,11,0.25)', text: '#fbbf24', icon: '📝' },
+  'ACTA_ADMINISTRATIVA': { bg: 'rgba(239,68,68,0.2)', text: '#fca5a5', icon: '🚨' },
+  'BAJA': { bg: 'rgba(239,68,68,0.35)', text: '#f87171', icon: '🔴' }
+};
+
+async function renderModalAudios(act, cat) {
+  document.getElementById('modal-body').innerHTML = `<div style="text-align:center; padding:40px;"><div class="loader"></div></div>`;
+  document.getElementById('modal-actions').innerHTML = `<button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>`;
+  
+  try {
+    const min = act.cantidad_objetivo;
+    
+    // Cargar agentes presentes
+    const agentesPresentes = agentesActivos.filter(a => agentesPresentesIds.includes(a.id));
+    
+    // Cargar auditorías de hoy
+    const { data: audsHoy } = await sb.from('auditoria_audios')
+      .select('*')
+      .eq('bitacora_actividad_id', act.id)
+      .order('created_at');
+    
+    // Cargar compromisos pendientes de verificar (de días anteriores)
+    const hoyLocal = getFechaLocal(new Date());
+    const { data: compromisosPendientes } = await sb.from('auditoria_audios')
+      .select('*')
+      .eq('supervisor_id', currentSupervisor.id)
+      .eq('tipificacion', 'AREAS_OPORTUNIDAD')
+      .is('compromiso_cumplido', null)
+      .lte('fecha_verificacion', hoyLocal)
+      .order('fecha_verificacion');
+    
+    // Conteo de auditorías por agente hoy
+    const conteoPorAgente = {};
+    (audsHoy || []).forEach(a => {
+      conteoPorAgente[a.agente_id] = (conteoPorAgente[a.agente_id] || 0) + 1;
+    });
+    
+    // Resumen visual por agente
+    let resumenAgentes = '';
+    agentesPresentes.forEach(ag => {
+      const hechas = conteoPorAgente[ag.id] || 0;
+      const completo = hechas >= min;
+      // ¿Tiene auditoría de hoy y de qué tipo?
+      const audAg = (audsHoy || []).find(a => a.agente_id === ag.id);
+      let icono = '';
+      if (audAg) {
+        if (audAg.tipificacion === 'CORRECTA') icono = ' ✅';
+        else if (audAg.tipificacion === 'AREAS_OPORTUNIDAD') icono = ' ⚠️';
+        else if (audAg.tipificacion === 'MALA_LLAMADA') icono = ' 🚨';
+      }
+      resumenAgentes += `<span style="display:inline-block; padding:3px 8px; margin:2px; border-radius:6px; font-size:11px; background:${completo ? 'rgba(16,185,129,0.2)' : 'rgba(255,255,255,0.05)'}; color:${completo ? '#6ee7b7' : 'rgba(255,255,255,0.7)'};">${ag.nombre}: ${hechas}/${min}${icono}</span>`;
+    });
+    
+    // BLOQUE 1: Compromisos pendientes
+    let compromisosHTML = '';
+    if (compromisosPendientes && compromisosPendientes.length > 0) {
+      compromisosHTML = `
+        <div style="background:rgba(245,158,11,0.06); border:1px solid rgba(245,158,11,0.4); border-radius:12px; padding:14px; margin-bottom:16px;">
+          <p style="font-size:13px; font-weight:700; margin-bottom:10px; color:#fbbf24; text-transform:uppercase; letter-spacing:1px;">🔄 Compromisos pendientes de verificar (${compromisosPendientes.length})</p>
+          <p style="font-size:11px; color:rgba(255,255,255,0.6); margin-bottom:12px;">Audios con áreas de oportunidad capturados antes. Marca si el agente cumplió o no el compromiso.</p>
+          ${compromisosPendientes.map(c => `
+            <div style="background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:10px; padding:12px; margin-bottom:8px;">
+              <div style="font-weight:600; font-size:14px; margin-bottom:4px;">👤 ${c.agente_nombre}</div>
+              <div style="font-size:12px; color:rgba(255,255,255,0.6); margin-bottom:6px;">📞 DN: ${c.dn_telefono || '—'} · Capturado: ${new Date(c.created_at).toLocaleDateString('es-MX', {day:'2-digit', month:'short'})}</div>
+              <div style="font-size:13px; padding:8px; background:rgba(0,0,0,0.2); border-radius:6px; margin-bottom:8px;">📝 <strong>Compromiso:</strong> ${c.compromiso}</div>
+              <div style="display:flex; gap:8px;">
+                <button class="btn btn-success" style="flex:1; font-size:12px; padding:8px;" onclick="evaluarCompromiso('${c.id}', true, '${act.id}')">✅ Cumplido</button>
+                <button class="btn btn-danger" style="flex:1; font-size:12px; padding:8px;" onclick="evaluarCompromiso('${c.id}', false, '${act.id}')">❌ No cumplido</button>
+              </div>
+            </div>
+          `).join('')}
+        </div>`;
+    }
+    
+    // BLOQUE 2: Auditorías capturadas hoy
+    let audsHoyHTML = '';
+    if (audsHoy && audsHoy.length > 0) {
+      audsHoyHTML = audsHoy.map(a => {
+        let badge = '';
+        if (a.tipificacion === 'CORRECTA') badge = '<span style="background:rgba(16,185,129,0.2); color:#6ee7b7; padding:3px 8px; border-radius:6px; font-size:11px;">✅ Correcta</span>';
+        else if (a.tipificacion === 'AREAS_OPORTUNIDAD') badge = `<span style="background:rgba(245,158,11,0.2); color:#fbbf24; padding:3px 8px; border-radius:6px; font-size:11px;">⚠️ Oportunidad${a.compromiso_cumplido === false ? ' · No cumplido → escaló' : ''}</span>`;
+        else if (a.tipificacion === 'MALA_LLAMADA') {
+          const col = NIVEL_COLORES[a.accion_tomada] || NIVEL_COLORES.RETROALIMENTACION;
+          badge = `<span style="background:${col.bg}; color:${col.text}; padding:3px 8px; border-radius:6px; font-size:11px;">${col.icon} ${NIVEL_NOMBRES[a.accion_tomada]}${a.estado === 'PENDIENTE_AUTORIZACION' ? ' (pend. autoriz.)' : ''}</span>`;
+        }
+        
+        return `
+          <div style="background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:10px; padding:10px 12px; margin-bottom:6px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:4px;">
+              <div style="font-weight:600; font-size:13px;">${a.agente_nombre}</div>
+              ${badge}
+            </div>
+            <div style="font-size:11px; color:rgba(255,255,255,0.5);">DN: ${a.dn_telefono || '—'}${a.hallazgos ? ' · ' + a.hallazgos.substring(0, 60) : ''}</div>
+            ${a.compromiso ? `<div style="font-size:11px; color:rgba(255,255,255,0.6); margin-top:4px;">📝 ${a.compromiso}</div>` : ''}
+          </div>`;
+      }).join('');
+    }
+    
+    document.getElementById('modal-body').innerHTML = `
+      <p style="margin-bottom:12px; color:rgba(255,255,255,0.8);">Cuota mínima del día: <strong>${min} por agente</strong> · Capturadas: <strong>${audsHoy?.length || 0}</strong></p>
+      <div style="margin-bottom:16px; padding:10px; background:rgba(255,255,255,0.04); border-radius:8px; line-height:1.8;">${resumenAgentes || '<small>Sin agentes presentes</small>'}</div>
+      
+      ${compromisosHTML}
+      
+      <div style="background:rgba(0,168,225,0.08); border:1px solid rgba(0,168,225,0.3); border-radius:10px; padding:14px; margin-bottom:16px;">
+        <p style="font-size:13px; font-weight:600; margin-bottom:10px;">🆕 Capturar nueva auditoría</p>
+        <div class="form-group">
+          <label>Agente</label>
+          <select id="aud-agente" onchange="onCambioAgenteAudio()">
+            <option value="">-- Selecciona agente presente --</option>
+            ${agentesPresentes.map(a => `<option value="${a.id}" data-nombre="${a.nombre}">${a.nombre}</option>`).join('')}
+          </select>
+          <div id="aud-info-agente" style="display:none; margin-top:6px; padding:8px; background:rgba(255,255,255,0.04); border-radius:6px; font-size:11px;"></div>
+        </div>
+        <div class="form-group">
+          <label>DN / Teléfono del cliente</label>
+          <input type="text" id="aud-dn" placeholder="Ej: 5512345678">
+        </div>
+        <div class="form-group">
+          <label>Tipificación</label>
+          <select id="aud-tipificacion" onchange="onCambioTipificacionAudio()">
+            <option value="">-- Selecciona --</option>
+            <option value="CORRECTA">✅ Llamada correcta</option>
+            <option value="AREAS_OPORTUNIDAD">⚠️ Áreas de oportunidad</option>
+            <option value="MALA_LLAMADA">🚨 Mala llamada</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Hallazgos / observaciones</label>
+          <textarea id="aud-hallazgos" rows="2" placeholder="Qué encontraste en el audio..."></textarea>
+        </div>
+        
+        <div id="aud-compromiso-block" style="display:none;">
+          <div style="background:rgba(245,158,11,0.06); border:1px solid rgba(245,158,11,0.3); border-radius:8px; padding:12px; margin-bottom:12px;">
+            <p style="font-size:13px; font-weight:600; margin-bottom:8px; color:#fbbf24;">⚠️ Compromiso para mejora</p>
+            <div class="form-group" style="margin-bottom:8px;">
+              <label>Compromiso del agente</label>
+              <textarea id="aud-compromiso" rows="2" placeholder="Qué se compromete a mejorar el agente..."></textarea>
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+              <label>📅 Fecha para verificar cumplimiento</label>
+              <input type="date" id="aud-fecha-verif" min="${getFechaLocal(new Date())}">
+              <p style="font-size:11px; color:rgba(255,255,255,0.6); margin-top:4px;">El sistema te recordará verificar este día.</p>
+            </div>
+          </div>
+        </div>
+        
+        <div id="aud-mala-block" style="display:none;">
+          <div id="aud-sancion-info"></div>
+        </div>
+        
+        <button class="btn" id="aud-guardar-btn" onclick="guardarAuditoriaAudio('${act.id}')" style="margin-top:12px;">Guardar auditoría</button>
+      </div>
+      
+      ${audsHoy && audsHoy.length > 0 ? `
+        <div>
+          <p style="font-size:12px; font-weight:600; margin-bottom:8px; color:rgba(255,255,255,0.7); text-transform:uppercase; letter-spacing:1px;">Auditorías de hoy</p>
+          ${audsHoyHTML}
+        </div>
+      ` : ''}
+    `;
+    
+    // Default fecha verificación: mañana
+    const manana = new Date();
+    manana.setDate(manana.getDate() + 1);
+    setTimeout(() => {
+      const fechaInput = document.getElementById('aud-fecha-verif');
+      if (fechaInput) fechaInput.value = getFechaLocal(manana);
+    }, 100);
+    
+  } catch (err) {
+    console.error(err);
+    document.getElementById('modal-body').innerHTML = `<div class="error-msg show">Error: ${err.message}</div>`;
+  }
+}
+
+// Mostrar info del agente seleccionado (escalamiento previo)
+async function onCambioAgenteAudio() {
+  const sel = document.getElementById('aud-agente');
+  const agenteId = sel.value;
+  const infoDiv = document.getElementById('aud-info-agente');
+  
+  if (!agenteId) {
+    infoDiv.style.display = 'none';
+    return;
+  }
+  
+  // Cargar histórico del agente
+  const { data: historial } = await sb.from('auditoria_audios')
+    .select('tipificacion, accion_tomada, compromiso_cumplido, created_at')
+    .eq('agente_id', agenteId)
+    .order('created_at', { ascending: false });
+  
+  const totalMalas = (historial || []).filter(h => 
+    h.tipificacion === 'MALA_LLAMADA' || 
+    (h.tipificacion === 'AREAS_OPORTUNIDAD' && h.compromiso_cumplido === false)
+  ).length;
+  
+  const ultimaSancion = (historial || []).find(h => h.accion_tomada);
+  
+  if (totalMalas === 0) {
+    infoDiv.innerHTML = '<span style="color:#6ee7b7;">✅ Sin antecedentes de malas llamadas</span>';
+  } else {
+    let txt = `<span style="color:#fbbf24;">⚠️ Antecedentes: ${totalMalas} mala(s) llamada(s)</span>`;
+    if (ultimaSancion) {
+      txt += ` · Última sanción: <strong>${NIVEL_NOMBRES[ultimaSancion.accion_tomada]}</strong>`;
+    }
+    infoDiv.innerHTML = txt;
+  }
+  infoDiv.style.display = 'block';
+  
+  // Refrescar info de sanción si ya está en mala llamada
+  onCambioTipificacionAudio();
+}
+
+async function onCambioTipificacionAudio() {
+  const tip = document.getElementById('aud-tipificacion').value;
+  const compromisoBlock = document.getElementById('aud-compromiso-block');
+  const malaBlock = document.getElementById('aud-mala-block');
+  const sancionInfo = document.getElementById('aud-sancion-info');
+  const btn = document.getElementById('aud-guardar-btn');
+  
+  compromisoBlock.style.display = tip === 'AREAS_OPORTUNIDAD' ? 'block' : 'none';
+  malaBlock.style.display = tip === 'MALA_LLAMADA' ? 'block' : 'none';
+  
+  if (tip === 'MALA_LLAMADA') {
+    const agenteId = document.getElementById('aud-agente').value;
+    if (!agenteId) {
+      sancionInfo.innerHTML = '<div class="error-msg show">⚠️ Primero selecciona un agente</div>';
+      btn.disabled = true;
+      return;
+    }
+    
+    // Calcular siguiente sanción
+    const { data: result } = await sb.rpc('obtener_siguiente_sancion', { p_agente_id: agenteId });
+    const sancion = result?.[0];
+    
+    if (!sancion) {
+      sancionInfo.innerHTML = '<div class="error-msg show">Error al calcular sanción</div>';
+      return;
+    }
+    
+    const col = NIVEL_COLORES[sancion.siguiente_accion];
+    const requiereAutorizacion = sancion.requiere_autorizacion;
+    
+    sancionInfo.innerHTML = `
+      <div style="background:${col.bg}; border:1px solid ${col.text}; border-radius:8px; padding:14px;">
+        <p style="font-size:13px; font-weight:700; color:${col.text}; margin-bottom:6px;">${col.icon} Siguiente sanción: ${NIVEL_NOMBRES[sancion.siguiente_accion]}</p>
+        <p style="font-size:12px; color:rgba(255,255,255,0.8);">Esta sería la <strong>${sancion.num_mala_llamada}ª mala llamada</strong> en el histórico del agente.</p>
+        ${requiereAutorizacion ? `
+          <div style="margin-top:10px; padding:10px; background:rgba(0,0,0,0.3); border-radius:6px;">
+            <p style="font-size:12px; color:#fca5a5; font-weight:600;">🔒 REQUIERE AUTORIZACIÓN DEL COORDINADOR</p>
+            <p style="font-size:11px; color:rgba(255,255,255,0.7); margin-top:4px;">Al guardar, quedará en estado PENDIENTE. El coordinador debe autorizar antes de aplicarse.</p>
+          </div>
+        ` : ''}
+      </div>
+    `;
+    btn.disabled = false;
+    btn.innerHTML = requiereAutorizacion ? '🔒 Solicitar autorización al coordinador' : `Aplicar ${NIVEL_NOMBRES[sancion.siguiente_accion]}`;
+  } else {
+    btn.disabled = false;
+    btn.innerHTML = 'Guardar auditoría';
+  }
+}
+
+async function guardarAuditoriaAudio(actId) {
+  const agenteId = document.getElementById('aud-agente').value;
+  const dn = document.getElementById('aud-dn').value.trim();
+  const tipificacion = document.getElementById('aud-tipificacion').value;
+  const hallazgos = document.getElementById('aud-hallazgos').value.trim();
+  
+  if (!agenteId) { alert('Selecciona un agente'); return; }
+  if (!dn) { alert('Captura el DN/teléfono del cliente'); return; }
+  if (!tipificacion) { alert('Selecciona la tipificación'); return; }
+  if (!hallazgos) { alert('Captura los hallazgos'); return; }
+  
+  const agenteNombre = document.getElementById('aud-agente').selectedOptions[0].dataset.nombre;
+  
+  const payload = {
+    bitacora_actividad_id: actId,
+    supervisor_id: currentSupervisor.id,
+    agente_id: agenteId,
+    agente_nombre: agenteNombre,
+    dn_telefono: dn,
+    hallazgos: hallazgos,
+    tipificacion: tipificacion,
+    estado: 'ACTIVA'
+  };
+  
+  if (tipificacion === 'AREAS_OPORTUNIDAD') {
+    const compromiso = document.getElementById('aud-compromiso').value.trim();
+    const fechaVerif = document.getElementById('aud-fecha-verif').value;
+    if (!compromiso) { alert('Captura el compromiso del agente'); return; }
+    if (!fechaVerif) { alert('Selecciona la fecha de verificación'); return; }
+    payload.compromiso = compromiso;
+    payload.fecha_verificacion = fechaVerif;
+  }
+  
+  if (tipificacion === 'MALA_LLAMADA') {
+    const { data: result } = await sb.rpc('obtener_siguiente_sancion', { p_agente_id: agenteId });
+    const sancion = result?.[0];
+    if (!sancion) { alert('Error calculando sanción'); return; }
+    
+    payload.accion_tomada = sancion.siguiente_accion;
+    payload.num_mala_llamada = sancion.num_mala_llamada;
+    payload.requiere_autorizacion = sancion.requiere_autorizacion;
+    
+    if (sancion.requiere_autorizacion) {
+      if (!confirm(`Esta acción requiere autorización del coordinador. ¿Solicitar autorización para aplicar ${NIVEL_NOMBRES[sancion.siguiente_accion]}?`)) return;
+      payload.estado = 'PENDIENTE_AUTORIZACION';
+    }
+  }
+  
+  const { error } = await sb.from('auditoria_audios').insert(payload);
+  if (error) { alert('Error: ' + error.message); return; }
+  
+  // Actualizar contador
+  const { count } = await sb.from('auditoria_audios').select('*', { count: 'exact', head: true }).eq('bitacora_actividad_id', actId);
+  const { data: actUpdated } = await sb.from('bitacora_actividad').select('cantidad_objetivo').eq('id', actId).single();
+  const total = actUpdated?.cantidad_objetivo || 0;
+  let nuevoEstado = count === 0 ? 'PENDIENTE' : 'PARCIAL';
+  if (count >= total && total > 0) nuevoEstado = 'COMPLETADA';
+  await sb.from('bitacora_actividad').update({
+    cantidad_realizada: count, estado: nuevoEstado,
+    porcentaje_completado: total > 0 ? (count/total)*100 : 0
+  }).eq('id', actId);
+  
+  await renderModalAudios(currentEditActividad.act, currentEditActividad.cat);
+  await loadActivities();
+}
+
+// Evaluar si un compromiso fue cumplido o no
+async function evaluarCompromiso(auditoriaId, cumplido, actIdHoy) {
+  if (!confirm(cumplido 
+    ? '¿Confirmar que el agente CUMPLIÓ el compromiso?' 
+    : '¿Confirmar que el agente NO cumplió? Esto contará como mala llamada y aplicará sanción progresiva.')) return;
+  
+  await sb.from('auditoria_audios').update({
+    compromiso_cumplido: cumplido,
+    fecha_evaluacion_compromiso: new Date().toISOString()
+  }).eq('id', auditoriaId);
+  
+  // Si NO cumplió, aplicar sanción automática
+  if (!cumplido) {
+    // Obtener datos del registro original
+    const { data: original } = await sb.from('auditoria_audios').select('*').eq('id', auditoriaId).single();
+    
+    // Calcular siguiente sanción
+    const { data: result } = await sb.rpc('obtener_siguiente_sancion', { p_agente_id: original.agente_id });
+    const sancion = result?.[0];
+    
+    if (sancion) {
+      // Crear nueva auditoría tipo MALA_LLAMADA derivada
+      const nuevoPayload = {
+        bitacora_actividad_id: actIdHoy,
+        supervisor_id: currentSupervisor.id,
+        agente_id: original.agente_id,
+        agente_nombre: original.agente_nombre,
+        dn_telefono: original.dn_telefono,
+        hallazgos: `[Compromiso no cumplido] ${original.compromiso}`,
+        tipificacion: 'MALA_LLAMADA',
+        accion_tomada: sancion.siguiente_accion,
+        num_mala_llamada: sancion.num_mala_llamada,
+        requiere_autorizacion: sancion.requiere_autorizacion,
+        estado: sancion.requiere_autorizacion ? 'PENDIENTE_AUTORIZACION' : 'ACTIVA'
+      };
+      await sb.from('auditoria_audios').insert(nuevoPayload);
+      
+      const txt = sancion.requiere_autorizacion 
+        ? `Compromiso no cumplido. Se solicitó autorización al coordinador para aplicar: ${NIVEL_NOMBRES[sancion.siguiente_accion]}`
+        : `Compromiso no cumplido. Se aplicó: ${NIVEL_NOMBRES[sancion.siguiente_accion]}`;
+      alert(txt);
+    }
+  }
+  
+  await renderModalAudios(currentEditActividad.act, currentEditActividad.cat);
   await loadActivities();
 }
 
