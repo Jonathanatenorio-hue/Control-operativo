@@ -1802,6 +1802,71 @@ async function renderModalWhatsapp(act, cat) {
       porAgente[c.agente_nombre].push(c);
     });
     
+    // Cargar conversiones de los agentes (histórico + mes)
+    // Usamos un Map agente_nombre -> stats
+    const agentesIds = [...new Set(casos.map(c => c.agente_nombre))];
+    let conversionesPorAgente = {};
+    
+    // Buscar IDs de agentes
+    const { data: agentesDB } = await sb.from('agentes')
+      .select('id, nombre')
+      .in('nombre', agentesIds);
+    const idPorNombre = {};
+    (agentesDB || []).forEach(a => { idPorNombre[a.nombre] = a.id; });
+    
+    // Cargar todas las auditorías de estos agentes para calcular conversión
+    const idsValidos = Object.values(idPorNombre).filter(Boolean);
+    if (idsValidos.length > 0) {
+      // Filtro de periodo viene de localStorage (default: histórico)
+      const periodoActual = localStorage.getItem('wa_periodo_filtro') || 'historico';
+      
+      let queryAuds = sb.from('auditoria_whatsapp')
+        .select('agente_id, mensaje_enviado, mensaje_personalizado, created_at')
+        .in('agente_id', idsValidos);
+      
+      // Aplicar filtro de periodo
+      if (periodoActual === 'mes') {
+        const inicioMes = new Date();
+        inicioMes.setDate(1);
+        inicioMes.setHours(0,0,0,0);
+        queryAuds = queryAuds.gte('created_at', inicioMes.toISOString());
+      } else if (periodoActual === '7dias') {
+        const hace7 = new Date();
+        hace7.setDate(hace7.getDate() - 7);
+        queryAuds = queryAuds.gte('created_at', hace7.toISOString());
+      } else if (periodoActual === '30dias') {
+        const hace30 = new Date();
+        hace30.setDate(hace30.getDate() - 30);
+        queryAuds = queryAuds.gte('created_at', hace30.toISOString());
+      }
+      // 'historico' = sin filtro
+      
+      const { data: todasAuds } = await queryAuds;
+      
+      // Agrupar y calcular conversiones
+      const agruparPorId = {};
+      (todasAuds || []).forEach(a => {
+        if (!agruparPorId[a.agente_id]) agruparPorId[a.agente_id] = [];
+        agruparPorId[a.agente_id].push(a);
+      });
+      
+      for (const nombre in idPorNombre) {
+        const id = idPorNombre[nombre];
+        const auds = agruparPorId[id] || [];
+        const total = auds.length;
+        const enviados = auds.filter(a => a.mensaje_enviado === true).length;
+        const personalizados = auds.filter(a => a.mensaje_personalizado === true).length;
+        
+        conversionesPorAgente[nombre] = {
+          total: total,
+          enviados: enviados,
+          personalizados: personalizados,
+          tasaEnvio: total > 0 ? Math.round((enviados / total) * 100) : 0,
+          tasaCalidad: enviados > 0 ? Math.round((personalizados / enviados) * 100) : 0
+        };
+      }
+    }
+    
     // Render bloque de SEGUIMIENTOS PENDIENTES
     let seguimientosHTML = '';
     if (seguimientos && seguimientos.length > 0) {
@@ -1824,10 +1889,22 @@ async function renderModalWhatsapp(act, cat) {
     }
     
     // Render bloque de NUEVOS CASOS por agente
+    const periodoActualLabel = {
+      'historico': 'Histórico total',
+      'mes': 'Mes en curso',
+      '30dias': 'Últimos 30 días',
+      '7dias': 'Últimos 7 días'
+    }[localStorage.getItem('wa_periodo_filtro') || 'historico'];
+    
     let casosHTML = '';
     for (const agente in porAgente) {
       const lista = porAgente[agente];
       const capturadosDeEste = lista.filter(c => audsMap[c.id]).length;
+      const conv = conversionesPorAgente[agente] || { total: 0, enviados: 0, personalizados: 0, tasaEnvio: 0, tasaCalidad: 0 };
+      
+      // Color de barra según porcentaje
+      const colorEnvio = conv.tasaEnvio >= 80 ? '#10b981' : conv.tasaEnvio >= 50 ? '#fbbf24' : '#ef4444';
+      const colorCalidad = conv.tasaCalidad >= 80 ? '#10b981' : conv.tasaCalidad >= 50 ? '#fbbf24' : '#ef4444';
       
       casosHTML += `
         <div style="margin-bottom:20px;">
@@ -1835,13 +1912,48 @@ async function renderModalWhatsapp(act, cat) {
             <p style="font-size:13px; font-weight:700; color:rgba(255,255,255,0.9);">👤 ${agente}</p>
             <span style="font-size:11px; color:rgba(255,255,255,0.6);">${capturadosDeEste}/${lista.length}</span>
           </div>
+          ${conv.total > 0 ? `
+            <div style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.06); border-radius:8px; padding:8px 10px; margin-bottom:8px;">
+              <div style="display:flex; gap:12px; flex-wrap:wrap; font-size:11px;">
+                <div style="flex:1; min-width:140px;">
+                  <div style="display:flex; justify-content:space-between; margin-bottom:3px;">
+                    <span style="color:rgba(255,255,255,0.6);">📤 Tasa envío</span>
+                    <span style="color:${colorEnvio}; font-weight:600;">${conv.tasaEnvio}% (${conv.enviados}/${conv.total})</span>
+                  </div>
+                  <div style="height:4px; background:rgba(255,255,255,0.08); border-radius:100px; overflow:hidden;">
+                    <div style="height:100%; width:${conv.tasaEnvio}%; background:${colorEnvio}; transition:width 0.4s;"></div>
+                  </div>
+                </div>
+                <div style="flex:1; min-width:140px;">
+                  <div style="display:flex; justify-content:space-between; margin-bottom:3px;">
+                    <span style="color:rgba(255,255,255,0.6);">✏️ Calidad</span>
+                    <span style="color:${colorCalidad}; font-weight:600;">${conv.tasaCalidad}% (${conv.personalizados}/${conv.enviados})</span>
+                  </div>
+                  <div style="height:4px; background:rgba(255,255,255,0.08); border-radius:100px; overflow:hidden;">
+                    <div style="height:100%; width:${conv.tasaCalidad}%; background:${colorCalidad}; transition:width 0.4s;"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ` : ''}
           ${lista.map(c => renderTarjetaCasoWhatsapp(c, audsMap[c.id], act.id)).join('')}
         </div>`;
     }
     
     document.getElementById('modal-body').innerHTML = `
       <div style="background:rgba(0,168,225,0.08); border:1px solid rgba(0,168,225,0.3); border-radius:10px; padding:14px; margin-bottom:16px;">
-        <p style="font-size:12px; color:rgba(255,255,255,0.7); margin-bottom:8px; text-transform:uppercase; letter-spacing:1px;">Casos del ${fechaTxt}</p>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; gap:12px; flex-wrap:wrap;">
+          <p style="font-size:12px; color:rgba(255,255,255,0.7); text-transform:uppercase; letter-spacing:1px;">Casos del ${fechaTxt}</p>
+          <div style="display:flex; gap:6px; align-items:center;">
+            <span style="font-size:11px; color:rgba(255,255,255,0.6);">📊 Conversiones:</span>
+            <select id="wa-periodo-filtro" onchange="cambiarPeriodoConversion()" style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; padding: 4px 8px; color: white; font-size: 11px;">
+              <option value="historico" ${(localStorage.getItem('wa_periodo_filtro') || 'historico') === 'historico' ? 'selected' : ''}>Histórico</option>
+              <option value="mes" ${localStorage.getItem('wa_periodo_filtro') === 'mes' ? 'selected' : ''}>Mes en curso</option>
+              <option value="30dias" ${localStorage.getItem('wa_periodo_filtro') === '30dias' ? 'selected' : ''}>Últimos 30 días</option>
+              <option value="7dias" ${localStorage.getItem('wa_periodo_filtro') === '7dias' ? 'selected' : ''}>Últimos 7 días</option>
+            </select>
+          </div>
+        </div>
         <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(80px, 1fr)); gap:6px;">
           <div style="background:rgba(255,255,255,0.05); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700;">${total}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">CASOS</div></div>
           <div style="background:rgba(255,255,255,0.05); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#fbbf24;">${pendientes}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">PEND.</div></div>
@@ -1858,6 +1970,16 @@ async function renderModalWhatsapp(act, cat) {
   } catch (err) {
     console.error(err);
     document.getElementById('modal-body').innerHTML = `<div class="error-msg show">Error: ${err.message}</div>`;
+  }
+}
+
+// Cambiar el periodo y recargar
+function cambiarPeriodoConversion() {
+  const periodo = document.getElementById('wa-periodo-filtro').value;
+  localStorage.setItem('wa_periodo_filtro', periodo);
+  // Recargar el modal completo
+  if (currentEditActividad) {
+    renderModalWhatsapp(currentEditActividad.act, currentEditActividad.cat);
   }
 }
 
