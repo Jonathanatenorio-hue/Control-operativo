@@ -759,11 +759,11 @@ async function renderModalPostVenta(act, cat) {
   const fechaVentas = getFechaVentas();
   const fechaTxt = new Date(fechaVentas + 'T12:00:00').toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' });
   
-  document.getElementById('modal-body').innerHTML = `<div style="text-align:center; padding:40px;"><div class="loader"></div><p style="margin-top:12px; color:rgba(255,255,255,0.6); font-size:13px;">Cargando ventas del ${fechaTxt}...</p></div>`;
+  document.getElementById('modal-body').innerHTML = `<div style="text-align:center; padding:40px;"><div class="loader"></div><p style="margin-top:12px; color:rgba(255,255,255,0.6); font-size:13px;">Cargando ventas y seguimientos...</p></div>`;
   document.getElementById('modal-actions').innerHTML = `<button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>`;
   
   try {
-    // Obtener nombres alternativos del supervisor (Carmen / Carmen Rivas)
+    // Obtener nombres alternativos del supervisor
     const mapeo = await getMapeoSupervisor();
     const nombresSupervisor = [currentSupervisor.nombre];
     mapeo.forEach(m => {
@@ -772,8 +772,8 @@ async function renderModalPostVenta(act, cat) {
       }
     });
     
-    // Cargar ventas activadas del día anterior del informe-semanal
-    const { data: ventas, error: errVentas } = await sbInforme.from('ventas_detalle')
+    // 1. Cargar NUEVAS ventas activadas del día anterior
+    const { data: ventasNuevas, error: errVentas } = await sbInforme.from('ventas_detalle')
       .select('folio, telefono, ejecutivo, plan, fecha_activacion, hora_activacion, supervisor, supervisor_act, estatus')
       .eq('estatus', 'activada')
       .eq('fecha_activacion', fechaVentas)
@@ -781,8 +781,8 @@ async function renderModalPostVenta(act, cat) {
     
     if (errVentas) throw errVentas;
     
-    // Cruzar con entregas_detalle para obtener nombre del cliente (por folio primero)
-    const folios = (ventas || []).map(v => v.folio).filter(Boolean);
+    // Cruzar con entregas_detalle para nombre del cliente
+    const folios = (ventasNuevas || []).map(v => v.folio).filter(Boolean);
     let clientesPorFolio = {};
     let clientesPorTel = {};
     
@@ -798,8 +798,7 @@ async function renderModalPostVenta(act, cat) {
         }
       });
       
-      // Si quedaron ventas sin nombre, buscar por teléfono como respaldo
-      const ventasSinNombre = (ventas || []).filter(v => !clientesPorFolio[v.folio] && v.telefono);
+      const ventasSinNombre = (ventasNuevas || []).filter(v => !clientesPorFolio[v.folio] && v.telefono);
       if (ventasSinNombre.length > 0) {
         const tels = ventasSinNombre.map(v => v.telefono).filter(Boolean);
         const { data: entregasTel } = await sbInforme.from('entregas_detalle')
@@ -811,104 +810,203 @@ async function renderModalPostVenta(act, cat) {
       }
     }
     
-    // Enriquecer ventas con nombre del cliente
-    (ventas || []).forEach(v => {
+    (ventasNuevas || []).forEach(v => {
       v.cliente = clientesPorFolio[v.folio] || clientesPorTel[v.telefono] || null;
     });
     
-    // Cargar registros ya capturados de post-venta
-    const { data: capturados } = await sb.from('recurso_postventa').select('*').eq('bitacora_actividad_id', act.id);
-    const capturadosMap = {};
-    (capturados || []).forEach(c => { capturadosMap[c.folio] = c; });
+    // 2. Cargar capturas YA hechas de las ventas nuevas (para esta bitácora)
+    const { data: capturasNuevas } = await sb.from('recurso_postventa').select('*').eq('bitacora_actividad_id', act.id);
+    const capturasMap = {};
+    (capturasNuevas || []).forEach(c => { capturasMap[c.folio] = c; });
     
-    if (!ventas || ventas.length === 0) {
+    // 3. Cargar SEGUIMIENTOS PENDIENTES (de cualquier día anterior, sin cerrar)
+    const hoyLocal = getFechaLocal(new Date());
+    const { data: pendientes } = await sb.from('recurso_postventa')
+      .select('*')
+      .eq('supervisor_id', currentSupervisor.id)
+      .eq('caso_cerrado', false)
+      .or(`tipificacion.eq.SEGUIMIENTO,estatus_contacto.eq.NO_CONTACTADO`)
+      .order('created_at');
+    
+    // Filtrar: solo los que NO son de hoy y que sí deben aparecer
+    const seguimientosHoy = (pendientes || []).filter(p => {
+      // Ignorar los que ya están en este modal (son nuevas)
+      if (p.bitacora_actividad_id === act.id) return false;
+      
+      // Si es seguimiento, verificar fecha próximo contacto
+      if (p.tipificacion === 'SEGUIMIENTO' && p.fecha_proximo_contacto) {
+        return p.fecha_proximo_contacto <= hoyLocal;
+      }
+      
+      // Si es no contactado, mostrarlo si no es de hoy
+      if (p.estatus_contacto === 'NO_CONTACTADO') {
+        const fechaCreacion = p.created_at.split('T')[0];
+        return fechaCreacion < hoyLocal;
+      }
+      
+      return false;
+    });
+    
+    // Calcular cuota objetivo: nuevas + pendientes
+    const totalCasos = (ventasNuevas?.length || 0) + seguimientosHoy.length;
+    if (act.cantidad_objetivo !== totalCasos) {
+      await sb.from('bitacora_actividad').update({ cantidad_objetivo: totalCasos }).eq('id', act.id);
+    }
+    
+    // Si no hay nada que hacer
+    if (totalCasos === 0) {
       document.getElementById('modal-body').innerHTML = `
         <div style="text-align:center; padding:40px;">
           <h3 style="font-size:16px; margin-bottom:8px;">Sin ventas del ${fechaTxt}</h3>
-          <p style="font-size:13px; color:rgba(255,255,255,0.6);">Tu equipo no activó ventas el día anterior, o aún no se ha sincronizado.</p>
-          <button class="btn btn-success" style="margin-top:20px;" onclick="marcarPostventaSinVentas('${act.id}')">Marcar como N/A (sin ventas) ✓</button>
+          <p style="font-size:13px; color:rgba(255,255,255,0.6);">Tu equipo no activó ventas el día anterior y no tienes seguimientos pendientes.</p>
+          <button class="btn btn-success" style="margin-top:20px;" onclick="marcarPostventaSinVentas('${act.id}')">Marcar como N/A ✓</button>
         </div>`;
       return;
     }
     
-    // Calcular cantidad objetivo automáticamente
-    if (act.cantidad_objetivo !== ventas.length) {
-      await sb.from('bitacora_actividad').update({ cantidad_objetivo: ventas.length }).eq('id', act.id);
+    // Stats
+    const total = ventasNuevas?.length || 0;
+    const contactados = (ventasNuevas || []).filter(v => capturasMap[v.folio]?.estatus_contacto === 'CONTACTADO').length;
+    const noContactados = (ventasNuevas || []).filter(v => capturasMap[v.folio]?.estatus_contacto === 'NO_CONTACTADO').length;
+    const ventasAd = (ventasNuevas || []).filter(v => capturasMap[v.folio]?.tipificacion === 'VENTA_ADICIONAL').length;
+    const seguimientos = (ventasNuevas || []).filter(v => capturasMap[v.folio]?.tipificacion === 'SEGUIMIENTO').length;
+    const pendientesNuevas = total - contactados - noContactados;
+    
+    // 2 fórmulas de conversión
+    const eficienciaReal = total > 0 ? Math.round((ventasAd / total) * 100) : 0;
+    const calidadCierre = contactados > 0 ? Math.round((ventasAd / contactados) * 100) : 0;
+    
+    // Renderizar bloque de NUEVAS VENTAS
+    let ventasNuevasHTML = '';
+    if (ventasNuevas && ventasNuevas.length > 0) {
+      ventasNuevasHTML = ventasNuevas.map(v => renderTarjetaVenta(v, capturasMap[v.folio], act.id, false)).join('');
+    } else {
+      ventasNuevasHTML = '<p style="color:rgba(255,255,255,0.5); font-size:13px; text-align:center; padding:20px;">No hay ventas nuevas del día anterior.</p>';
     }
     
-    // Stats
-    const total = ventas.length;
-    const contactados = ventas.filter(v => capturadosMap[v.folio]?.estatus_contacto === 'CONTACTADO').length;
-    const noContactados = ventas.filter(v => capturadosMap[v.folio]?.estatus_contacto === 'NO_CONTACTADO').length;
-    const ventasAd = ventas.filter(v => capturadosMap[v.folio]?.tipificacion === 'VENTA_ADICIONAL').length;
-    const seguimientos = ventas.filter(v => capturadosMap[v.folio]?.tipificacion === 'SEGUIMIENTO').length;
-    const noInteresa = ventas.filter(v => capturadosMap[v.folio]?.tipificacion === 'NO_INTERESA').length;
-    const pendientes = total - contactados - noContactados;
-    
-    // Renderizar lista de ventas
-    let ventasHTML = ventas.map(v => {
-      const cap = capturadosMap[v.folio];
-      let statusBadge = '';
-      let cardClass = 'background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1);';
-      
-      if (cap) {
-        if (cap.estatus_contacto === 'CONTACTADO') {
-          if (cap.tipificacion === 'VENTA_ADICIONAL') {
-            statusBadge = '<span style="background:rgba(16,185,129,0.25); color:#6ee7b7; padding:3px 8px; border-radius:6px; font-size:11px; font-weight:600;">🎉 VENTA ADICIONAL</span>';
-            cardClass = 'background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.4);';
-          } else if (cap.tipificacion === 'SEGUIMIENTO') {
-            statusBadge = '<span style="background:rgba(0,168,225,0.25); color:#7dd3fc; padding:3px 8px; border-radius:6px; font-size:11px; font-weight:600;">🔄 SEGUIMIENTO</span>';
-            cardClass = 'background: rgba(0,168,225,0.08); border: 1px solid rgba(0,168,225,0.4);';
-          } else {
-            statusBadge = '<span style="background:rgba(245,158,11,0.25); color:#fbbf24; padding:3px 8px; border-radius:6px; font-size:11px; font-weight:600;">❌ NO INTERESA</span>';
-            cardClass = 'background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.4);';
-          }
-        } else {
-          statusBadge = `<span style="background:rgba(239,68,68,0.25); color:#fca5a5; padding:3px 8px; border-radius:6px; font-size:11px; font-weight:600;">📵 ${cap.motivo_no_contacto || 'NO CONTACTADO'}</span>`;
-          cardClass = 'background: rgba(239,68,68,0.06); border: 1px solid rgba(239,68,68,0.3);';
-        }
-      } else {
-        statusBadge = '<span style="background:rgba(255,255,255,0.1); color:rgba(255,255,255,0.6); padding:3px 8px; border-radius:6px; font-size:11px; font-weight:600;">⏳ PENDIENTE</span>';
-      }
-      
-      return `
-        <div style="${cardClass} border-radius: 10px; padding: 12px 14px; margin-bottom: 8px;">
-          <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:6px;">
-            <div style="flex:1;">
-              <div style="font-weight:600; font-size:14px; margin-bottom:2px;">${v.cliente ? '👤 ' + v.cliente : '📞 ' + (v.telefono || 'Sin tel')}</div>
-              <div style="font-size:12px; color:rgba(255,255,255,0.7); margin-bottom:2px;">${v.cliente ? '📞 ' + (v.telefono || '—') + ' · ' : ''}${v.plan || 'Sin plan'}</div>
-              <div style="font-size:11px; color:rgba(255,255,255,0.5);">Folio: ${v.folio} · Agente: ${v.ejecutivo || '—'} · ${v.hora_activacion || ''}</div>
-            </div>
-            ${statusBadge}
-          </div>
-          ${cap && cap.estatus_contacto === 'CONTACTADO' ? `
-            <div style="font-size:12px; color:rgba(255,255,255,0.7); padding-top:6px; margin-top:6px; border-top:1px solid rgba(255,255,255,0.05);">
-              Canal: ${cap.canal_contacto || '—'} · ${cap.hora_contacto ? new Date(cap.hora_contacto).toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}) : ''}
-              ${cap.folio_venta_adicional ? ' · 🎯 Folio nuevo: <strong>' + cap.folio_venta_adicional + '</strong>' + (cap.validacion_folio === 'VALIDO' ? ' ✅' : cap.validacion_folio === 'PENDIENTE' ? ' ⏳' : ' ⚠️') : ''}
-              ${cap.tiene_referidos ? ' · 👥 Referidos' : ''}
-            </div>
-          ` : ''}
-          <button class="btn btn-secondary" style="width:100%; margin-top:8px; font-size:12px; padding:8px;" onclick="abrirCapturaPostventa('${act.id}', '${v.folio}', ${JSON.stringify(v).replace(/"/g, '&quot;')})">${cap ? '✏️ Editar' : '📝 Capturar contacto'}</button>
+    // Renderizar bloque de SEGUIMIENTOS PENDIENTES
+    let seguimientosHTML = '';
+    if (seguimientosHoy.length > 0) {
+      seguimientosHTML = `
+        <div style="background:rgba(0,168,225,0.05); border:1px solid rgba(0,168,225,0.3); border-radius:12px; padding:14px; margin-top:16px;">
+          <p style="font-size:13px; font-weight:700; margin-bottom:10px; color:#7dd3fc; text-transform:uppercase; letter-spacing:1px;">🔄 Seguimientos pendientes (${seguimientosHoy.length})</p>
+          <p style="font-size:11px; color:rgba(255,255,255,0.6); margin-bottom:12px;">Casos de días anteriores que requieren contacto hoy.</p>
+          ${seguimientosHoy.map(p => renderTarjetaSeguimiento(p, act.id)).join('')}
         </div>`;
-    }).join('');
+    }
     
     document.getElementById('modal-body').innerHTML = `
       <div style="background:rgba(0,168,225,0.08); border:1px solid rgba(0,168,225,0.3); border-radius:10px; padding:14px; margin-bottom:16px;">
         <p style="font-size:12px; color:rgba(255,255,255,0.7); margin-bottom:8px; text-transform:uppercase; letter-spacing:1px;">Ventas activadas el ${fechaTxt}</p>
-        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(90px, 1fr)); gap:6px;">
-          <div style="background:rgba(255,255,255,0.05); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700;">${total}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">TOTAL</div></div>
-          <div style="background:rgba(255,255,255,0.05); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#fbbf24;">${pendientes}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">PENDIENTES</div></div>
-          <div style="background:rgba(16,185,129,0.1); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#6ee7b7;">${ventasAd}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">V. ADIC.</div></div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(80px, 1fr)); gap:6px;">
+          <div style="background:rgba(255,255,255,0.05); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700;">${total}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">VENTAS</div></div>
+          <div style="background:rgba(255,255,255,0.05); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#fbbf24;">${pendientesNuevas}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">PEND.</div></div>
+          <div style="background:rgba(16,185,129,0.1); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#6ee7b7;">${ventasAd}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">V.ADIC.</div></div>
           <div style="background:rgba(0,168,225,0.1); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#7dd3fc;">${seguimientos}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">SEGUIM.</div></div>
-          <div style="background:rgba(168,85,247,0.1); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#c4b5fd;">${contactados > 0 ? Math.round((ventasAd/contactados)*100) : 0}%</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">CONVERSIÓN</div></div>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:8px;">
+          <div style="background:rgba(168,85,247,0.1); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:16px; font-weight:700; color:#c4b5fd;">${eficienciaReal}%</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">EFICIENCIA RECURSO</div></div>
+          <div style="background:rgba(168,85,247,0.05); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:16px; font-weight:700; color:#c4b5fd;">${calidadCierre}%</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">CALIDAD CIERRE</div></div>
         </div>
       </div>
-      <div style="max-height:500px; overflow-y:auto;">${ventasHTML}</div>
+      <div style="max-height:600px; overflow-y:auto;">
+        <p style="font-size:13px; font-weight:700; margin-bottom:10px; color:rgba(255,255,255,0.8); text-transform:uppercase; letter-spacing:1px;">🆕 Nuevas ventas del ${fechaTxt}</p>
+        ${ventasNuevasHTML}
+        ${seguimientosHTML}
+      </div>
     `;
   } catch (err) {
     console.error(err);
     document.getElementById('modal-body').innerHTML = `<div class="error-msg show">Error: ${err.message}</div>`;
   }
+}
+
+// Helper para renderizar tarjeta de venta nueva
+function renderTarjetaVenta(v, cap, actId, isSeguimiento) {
+  let statusBadge = '';
+  let cardClass = 'background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1);';
+  
+  if (cap) {
+    if (cap.estatus_contacto === 'CONTACTADO') {
+      if (cap.tipificacion === 'VENTA_ADICIONAL') {
+        statusBadge = '<span style="background:rgba(16,185,129,0.25); color:#6ee7b7; padding:3px 8px; border-radius:6px; font-size:11px; font-weight:600;">🎉 VENTA ADICIONAL</span>';
+        cardClass = 'background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.4);';
+      } else if (cap.tipificacion === 'SEGUIMIENTO') {
+        const fechaProx = cap.fecha_proximo_contacto ? new Date(cap.fecha_proximo_contacto + 'T12:00:00').toLocaleDateString('es-MX', {day:'2-digit', month:'short'}) : '';
+        statusBadge = `<span style="background:rgba(0,168,225,0.25); color:#7dd3fc; padding:3px 8px; border-radius:6px; font-size:11px; font-weight:600;">🔄 SEG. ${fechaProx}</span>`;
+        cardClass = 'background: rgba(0,168,225,0.08); border: 1px solid rgba(0,168,225,0.4);';
+      } else {
+        statusBadge = '<span style="background:rgba(245,158,11,0.25); color:#fbbf24; padding:3px 8px; border-radius:6px; font-size:11px; font-weight:600;">❌ NO INTERESA</span>';
+        cardClass = 'background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.4);';
+      }
+    } else {
+      statusBadge = `<span style="background:rgba(239,68,68,0.25); color:#fca5a5; padding:3px 8px; border-radius:6px; font-size:11px; font-weight:600;">📵 ${cap.motivo_no_contacto || 'NO CONTACTADO'}</span>`;
+      cardClass = 'background: rgba(239,68,68,0.06); border: 1px solid rgba(239,68,68,0.3);';
+    }
+  } else {
+    statusBadge = '<span style="background:rgba(255,255,255,0.1); color:rgba(255,255,255,0.6); padding:3px 8px; border-radius:6px; font-size:11px; font-weight:600;">⏳ PENDIENTE</span>';
+  }
+  
+  return `
+    <div style="${cardClass} border-radius: 10px; padding: 12px 14px; margin-bottom: 8px;">
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:6px;">
+        <div style="flex:1;">
+          <div style="font-weight:600; font-size:14px; margin-bottom:2px;">${v.cliente ? '👤 ' + v.cliente : '📞 ' + (v.telefono || 'Sin tel')}</div>
+          <div style="font-size:12px; color:rgba(255,255,255,0.7); margin-bottom:2px;">${v.cliente ? '📞 ' + (v.telefono || '—') + ' · ' : ''}${v.plan || 'Sin plan'}</div>
+          <div style="font-size:11px; color:rgba(255,255,255,0.5);">Folio: ${v.folio} · Agente: ${v.ejecutivo || '—'} · ${v.hora_activacion || ''}</div>
+        </div>
+        ${statusBadge}
+      </div>
+      <button class="btn btn-secondary" style="width:100%; margin-top:8px; font-size:12px; padding:8px;" onclick="abrirCapturaPostventa('${actId}', '${v.folio}', ${JSON.stringify(v).replace(/"/g, '&quot;')})">${cap ? '✏️ Editar' : '📝 Capturar contacto'}</button>
+    </div>`;
+}
+
+// Helper para renderizar tarjeta de seguimiento pendiente (de día anterior)
+function renderTarjetaSeguimiento(p, actIdHoy) {
+  const fechaCreacion = new Date(p.created_at).toLocaleDateString('es-MX', {day:'2-digit', month:'short'});
+  const motivo = p.tipificacion === 'SEGUIMIENTO' ? '🔄 Seguimiento programado' : '📵 No contactado anterior';
+  const intentos = p.num_intento || 1;
+  
+  // Reconstruir ventaData
+  const ventaData = {
+    folio: p.folio,
+    telefono: p.telefono,
+    ejecutivo: p.agente_nombre,
+    plan: p.plan,
+    fecha_activacion: p.fecha_activacion,
+    hora_activacion: p.hora_activacion,
+    cliente: p.cliente_nombre
+  };
+  
+  return `
+    <div style="background:rgba(0,168,225,0.06); border:1px solid rgba(0,168,225,0.3); border-radius:10px; padding:12px 14px; margin-bottom:8px;">
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:6px;">
+        <div style="flex:1;">
+          <div style="font-weight:600; font-size:14px; margin-bottom:2px;">${p.cliente_nombre ? '👤 ' + p.cliente_nombre : '📞 ' + (p.telefono || 'Sin tel')}</div>
+          <div style="font-size:12px; color:rgba(255,255,255,0.7); margin-bottom:2px;">${p.cliente_nombre ? '📞 ' + (p.telefono || '—') + ' · ' : ''}${p.plan || 'Sin plan'}</div>
+          <div style="font-size:11px; color:rgba(255,255,255,0.5);">${motivo} · Capturado: ${fechaCreacion} · Intento ${intentos}</div>
+          ${p.nota_avance ? `<div style="font-size:11px; color:rgba(255,255,255,0.6); margin-top:4px; padding:6px; background:rgba(0,0,0,0.2); border-radius:4px;">📝 Última nota: ${p.nota_avance.substring(0, 100)}${p.nota_avance.length > 100 ? '...' : ''}</div>` : ''}
+        </div>
+      </div>
+      <button class="btn" style="width:100%; margin-top:8px; font-size:12px; padding:8px;" onclick="abrirCapturaSeguimiento('${actIdHoy}', '${p.id}', ${JSON.stringify(ventaData).replace(/"/g, '&quot;')})">📞 Trabajar este caso</button>
+    </div>`;
+}
+
+// Abrir captura desde un seguimiento pendiente
+function abrirCapturaSeguimiento(actIdHoy, casoPadreId, ventaData) {
+  // Trabajar este caso = crear un NUEVO registro vinculado al original
+  capturaPostventaContext = { 
+    actId: actIdHoy, 
+    folio: ventaData.folio, 
+    ventaData: ventaData,
+    casoPadreId: casoPadreId,
+    esContinuacion: true
+  };
+  
+  // Cargar el caso padre para mostrar contexto
+  sb.from('recurso_postventa').select('*').eq('id', casoPadreId).single().then(({data: padre}) => {
+    renderCapturaPostventaModal({}, padre);
+  });
 }
 
 async function marcarPostventaSinVentas(actId) {
@@ -924,114 +1022,151 @@ async function marcarPostventaSinVentas(actId) {
 // Sub-modal de captura
 let capturaPostventaContext = null;
 function abrirCapturaPostventa(actId, folio, ventaData) {
-  capturaPostventaContext = { actId, folio, ventaData };
+  capturaPostventaContext = { actId, folio, ventaData, esContinuacion: false };
   
   // Cargar registro existente si lo hay
   sb.from('recurso_postventa').select('*').eq('bitacora_actividad_id', actId).eq('folio', folio).maybeSingle().then(({data: existing}) => {
-    const cap = existing || {};
-    
-    document.getElementById('modal-body').innerHTML = `
-      <div style="background:rgba(0,168,225,0.08); border:1px solid rgba(0,168,225,0.3); border-radius:10px; padding:12px; margin-bottom:16px;">
-        <div style="font-weight:600; font-size:14px;">📞 ${ventaData.telefono} · ${ventaData.plan}</div>
-        <div style="font-size:12px; color:rgba(255,255,255,0.6);">Folio: ${folio} · Agente: ${ventaData.ejecutivo} · ${ventaData.hora_activacion || ''}</div>
-      </div>
-      
-      <div class="form-group">
-        <label>Nombre del cliente ${ventaData.cliente ? '<span style="font-size:11px; color:#10b981;">(auto-detectado)</span>' : '<span style="font-size:11px; color:#fbbf24;">(no encontrado, opcional)</span>'}</label>
-        <input type="text" id="pv-cliente" placeholder="Nombre del cliente" value="${cap.cliente_nombre || ventaData.cliente || ''}">
-      </div>
-      
-      <div class="form-group">
-        <label>Canal de contacto</label>
-        <select id="pv-canal">
-          <option value="">-- Selecciona --</option>
-          <option value="LINEA_AGENTE" ${cap.canal_contacto === 'LINEA_AGENTE' ? 'selected' : ''}>Línea directa del agente</option>
-          <option value="BONSAIF" ${cap.canal_contacto === 'BONSAIF' ? 'selected' : ''}>Bonsaif</option>
-          <option value="WHATSAPP" ${cap.canal_contacto === 'WHATSAPP' ? 'selected' : ''}>WhatsApp</option>
-        </select>
-      </div>
-      
-      <div class="form-group">
-        <label>Estatus del contacto</label>
-        <select id="pv-estatus" onchange="togglePostventaCampos()">
-          <option value="">-- Selecciona --</option>
-          <option value="CONTACTADO" ${cap.estatus_contacto === 'CONTACTADO' ? 'selected' : ''}>✅ Contactado</option>
-          <option value="NO_CONTACTADO" ${cap.estatus_contacto === 'NO_CONTACTADO' ? 'selected' : ''}>❌ No contactado</option>
-        </select>
-      </div>
-      
-      <div id="pv-no-contacto" style="display:none;">
-        <div class="form-group">
-          <label>Motivo de no contacto</label>
-          <select id="pv-motivo-nc">
-            <option value="">-- Selecciona --</option>
-            <option value="NO_CONTESTA" ${cap.motivo_no_contacto === 'NO_CONTESTA' ? 'selected' : ''}>No contesta</option>
-            <option value="EQUIVOCADO" ${cap.motivo_no_contacto === 'EQUIVOCADO' ? 'selected' : ''}>Número equivocado</option>
-            <option value="FUERA_SERVICIO" ${cap.motivo_no_contacto === 'FUERA_SERVICIO' ? 'selected' : ''}>Fuera de servicio</option>
-            <option value="BUZON" ${cap.motivo_no_contacto === 'BUZON' ? 'selected' : ''}>Mandó a buzón</option>
-            <option value="OTRO" ${cap.motivo_no_contacto === 'OTRO' ? 'selected' : ''}>Otro</option>
-          </select>
-        </div>
-      </div>
-      
-      <div id="pv-contactado" style="display:none;">
-        <div class="form-group">
-          <label>Tipificación</label>
-          <select id="pv-tipificacion" onchange="togglePostventaCampos()">
-            <option value="">-- Selecciona --</option>
-            <option value="VENTA_ADICIONAL" ${cap.tipificacion === 'VENTA_ADICIONAL' ? 'selected' : ''}>🎉 Venta adicional cerrada</option>
-            <option value="SEGUIMIENTO" ${cap.tipificacion === 'SEGUIMIENTO' ? 'selected' : ''}>🔄 Seguimiento</option>
-            <option value="NO_INTERESA" ${cap.tipificacion === 'NO_INTERESA' ? 'selected' : ''}>❌ No le interesa</option>
-          </select>
-        </div>
-        
-        <div id="pv-venta-adicional" style="display:none;">
-          <div style="background:rgba(16,185,129,0.06); border:1px solid rgba(16,185,129,0.3); border-radius:10px; padding:12px; margin-bottom:12px;">
-            <p style="font-size:13px; font-weight:600; margin-bottom:8px; color:#6ee7b7;">🎉 Venta adicional - Folio para validación</p>
-            <div class="form-group" style="margin-bottom:0;">
-              <label>Folio de la nueva venta</label>
-              <input type="text" id="pv-folio-adicional" placeholder="Ej: ABC123456" value="${cap.folio_venta_adicional || ''}" style="text-transform:uppercase;">
-              <p style="font-size:11px; color:rgba(255,255,255,0.5); margin-top:4px;">📋 Se validará automáticamente cuando se actualice el informe-semanal con el Excel del día.</p>
-              ${cap.validacion_folio === 'VALIDO' ? '<p style="font-size:12px; color:#6ee7b7; margin-top:6px;">✅ Folio validado correctamente</p>' : ''}
-              ${cap.validacion_folio === 'PENDIENTE' ? '<p style="font-size:12px; color:#7dd3fc; margin-top:6px;">⏳ Pendiente de validación (informe-semanal aún no actualizado)</p>' : ''}
-              ${cap.validacion_folio === 'NO_ENCONTRADO' ? '<p style="font-size:12px; color:#fca5a5; margin-top:6px;">⚠️ Folio no encontrado tras 3+ días. Revisión necesaria.</p>' : ''}
-              ${cap.validacion_folio === 'AGENTE_DISTINTO' ? '<p style="font-size:12px; color:#fbbf24; margin-top:6px;">⚠️ Folio de otro supervisor</p>' : ''}
-            </div>
-          </div>
-        </div>
-        
-        <div id="pv-seguimiento" style="display:none;">
-          <div class="form-group">
-            <label>Nota de avance</label>
-            <textarea id="pv-nota-avance" rows="2" placeholder="Qué se acordó, dónde quedó la conversación...">${cap.nota_avance || ''}</textarea>
-          </div>
-          <div class="form-group">
-            <label>Motivo del seguimiento</label>
-            <textarea id="pv-motivo-seg" rows="2" placeholder="Por qué no cerró ahora, qué se necesita...">${cap.motivo_seguimiento || ''}</textarea>
-          </div>
-        </div>
-        
-        <div style="background:rgba(16,185,129,0.06); border:1px solid rgba(16,185,129,0.2); border-radius:10px; padding:12px; margin-top:12px;">
-          <p style="font-size:13px; font-weight:600; margin-bottom:8px;">👥 Referidos</p>
-          <div class="form-group">
-            <select id="pv-tiene-ref" onchange="toggleRefField()">
-              <option value="false" ${!cap.tiene_referidos ? 'selected' : ''}>Sin referidos</option>
-              <option value="true" ${cap.tiene_referidos ? 'selected' : ''}>Con referidos</option>
-            </select>
-            <textarea id="pv-referidos" rows="2" placeholder="Nombre y teléfono de referidos" style="margin-top:8px; display:none;">${cap.referidos_texto || ''}</textarea>
-          </div>
-        </div>
-      </div>
-    `;
-    
-    document.getElementById('modal-actions').innerHTML = `
-      <button class="btn btn-secondary" onclick="renderModalPostVenta(currentEditActividad.act, currentEditActividad.cat)">← Volver</button>
-      <button class="btn btn-success" onclick="guardarCapturaPostventa()">💾 Guardar contacto</button>
-    `;
-    
-    togglePostventaCampos();
-    toggleRefField();
+    renderCapturaPostventaModal(existing || {}, null);
   });
+}
+
+function renderCapturaPostventaModal(cap, casoPadre) {
+  const ctx = capturaPostventaContext;
+  const ventaData = ctx.ventaData;
+  const folio = ctx.folio;
+  
+  // Si es continuación, calcular número de intento
+  const numIntento = casoPadre ? ((casoPadre.num_intento || 1) + 1) : (cap.num_intento || 1);
+  
+  // Default fecha próximo contacto (mañana)
+  const manana = new Date();
+  manana.setDate(manana.getDate() + 1);
+  const mananaStr = getFechaLocal(manana);
+  
+  // Banner de continuación si aplica
+  const continuacionBanner = casoPadre ? `
+    <div style="background:rgba(0,168,225,0.1); border:1px solid rgba(0,168,225,0.4); border-radius:10px; padding:12px; margin-bottom:16px;">
+      <p style="font-size:13px; font-weight:600; color:#7dd3fc; margin-bottom:6px;">🔄 Continuación de caso (intento ${numIntento})</p>
+      <p style="font-size:12px; color:rgba(255,255,255,0.7);">Caso original: ${casoPadre.tipificacion === 'SEGUIMIENTO' ? 'Seguimiento programado' : 'No contactado anterior'} (${new Date(casoPadre.created_at).toLocaleDateString('es-MX', {day:'2-digit', month:'short'})})</p>
+      ${casoPadre.nota_avance ? `<p style="font-size:12px; color:rgba(255,255,255,0.6); margin-top:6px;">📝 Última nota: <em>${casoPadre.nota_avance}</em></p>` : ''}
+    </div>
+  ` : '';
+  
+  document.getElementById('modal-body').innerHTML = `
+    ${continuacionBanner}
+    <div style="background:rgba(0,168,225,0.08); border:1px solid rgba(0,168,225,0.3); border-radius:10px; padding:12px; margin-bottom:16px;">
+      <div style="font-weight:600; font-size:14px;">${ventaData.cliente ? '👤 ' + ventaData.cliente : '📞 ' + ventaData.telefono}</div>
+      <div style="font-size:12px; color:rgba(255,255,255,0.6);">Folio: ${folio} · Agente: ${ventaData.ejecutivo} · Plan: ${ventaData.plan || '—'}</div>
+    </div>
+    
+    <div class="form-group">
+      <label>Nombre del cliente ${ventaData.cliente ? '<span style="font-size:11px; color:#10b981;">(auto-detectado)</span>' : '<span style="font-size:11px; color:#fbbf24;">(no encontrado, opcional)</span>'}</label>
+      <input type="text" id="pv-cliente" placeholder="Nombre del cliente" value="${cap.cliente_nombre || ventaData.cliente || ''}">
+    </div>
+    
+    <div class="form-group">
+      <label>Canal de contacto</label>
+      <select id="pv-canal">
+        <option value="">-- Selecciona --</option>
+        <option value="LINEA_AGENTE" ${cap.canal_contacto === 'LINEA_AGENTE' ? 'selected' : ''}>Línea directa del agente</option>
+        <option value="BONSAIF" ${cap.canal_contacto === 'BONSAIF' ? 'selected' : ''}>Bonsaif</option>
+        <option value="WHATSAPP" ${cap.canal_contacto === 'WHATSAPP' ? 'selected' : ''}>WhatsApp</option>
+      </select>
+    </div>
+    
+    <div class="form-group">
+      <label>Estatus del contacto</label>
+      <select id="pv-estatus" onchange="togglePostventaCampos()">
+        <option value="">-- Selecciona --</option>
+        <option value="CONTACTADO" ${cap.estatus_contacto === 'CONTACTADO' ? 'selected' : ''}>✅ Contactado</option>
+        <option value="NO_CONTACTADO" ${cap.estatus_contacto === 'NO_CONTACTADO' ? 'selected' : ''}>❌ No contactado</option>
+      </select>
+    </div>
+    
+    <div id="pv-no-contacto" style="display:none;">
+      <div class="form-group">
+        <label>Motivo de no contacto</label>
+        <select id="pv-motivo-nc">
+          <option value="">-- Selecciona --</option>
+          <option value="NO_CONTESTA" ${cap.motivo_no_contacto === 'NO_CONTESTA' ? 'selected' : ''}>No contesta</option>
+          <option value="EQUIVOCADO" ${cap.motivo_no_contacto === 'EQUIVOCADO' ? 'selected' : ''}>Número equivocado</option>
+          <option value="FUERA_SERVICIO" ${cap.motivo_no_contacto === 'FUERA_SERVICIO' ? 'selected' : ''}>Fuera de servicio</option>
+          <option value="BUZON" ${cap.motivo_no_contacto === 'BUZON' ? 'selected' : ''}>Mandó a buzón</option>
+          <option value="OTRO" ${cap.motivo_no_contacto === 'OTRO' ? 'selected' : ''}>Otro</option>
+        </select>
+        <p style="font-size:11px; color:rgba(255,255,255,0.6); margin-top:6px;">📞 Este caso reaparecerá mañana en "seguimientos pendientes" para volver a intentar.</p>
+      </div>
+      <div class="form-group">
+        <label>¿Cerrar este caso definitivamente?</label>
+        <select id="pv-cerrar-nc">
+          <option value="false">No, intentar de nuevo después</option>
+          <option value="true">Sí, cerrar (no volver a intentar)</option>
+        </select>
+      </div>
+    </div>
+    
+    <div id="pv-contactado" style="display:none;">
+      <div class="form-group">
+        <label>Tipificación</label>
+        <select id="pv-tipificacion" onchange="togglePostventaCampos()">
+          <option value="">-- Selecciona --</option>
+          <option value="VENTA_ADICIONAL" ${cap.tipificacion === 'VENTA_ADICIONAL' ? 'selected' : ''}>🎉 Venta adicional cerrada</option>
+          <option value="SEGUIMIENTO" ${cap.tipificacion === 'SEGUIMIENTO' ? 'selected' : ''}>🔄 Seguimiento</option>
+          <option value="NO_INTERESA" ${cap.tipificacion === 'NO_INTERESA' ? 'selected' : ''}>❌ No le interesa</option>
+        </select>
+      </div>
+      
+      <div id="pv-venta-adicional" style="display:none;">
+        <div style="background:rgba(16,185,129,0.06); border:1px solid rgba(16,185,129,0.3); border-radius:10px; padding:12px; margin-bottom:12px;">
+          <p style="font-size:13px; font-weight:600; margin-bottom:8px; color:#6ee7b7;">🎉 Venta adicional - Folio para validación</p>
+          <div class="form-group" style="margin-bottom:0;">
+            <label>Folio de la nueva venta</label>
+            <input type="text" id="pv-folio-adicional" placeholder="Ej: ABC123456" value="${cap.folio_venta_adicional || ''}" style="text-transform:uppercase;">
+            <p style="font-size:11px; color:rgba(255,255,255,0.5); margin-top:4px;">📋 Se validará automáticamente cuando se actualice el informe-semanal con el Excel del día.</p>
+            ${cap.validacion_folio === 'VALIDO' ? '<p style="font-size:12px; color:#6ee7b7; margin-top:6px;">✅ Folio validado correctamente</p>' : ''}
+            ${cap.validacion_folio === 'PENDIENTE' ? '<p style="font-size:12px; color:#7dd3fc; margin-top:6px;">⏳ Pendiente de validación</p>' : ''}
+            ${cap.validacion_folio === 'NO_ENCONTRADO' ? '<p style="font-size:12px; color:#fca5a5; margin-top:6px;">⚠️ Folio no encontrado tras 3+ días</p>' : ''}
+            ${cap.validacion_folio === 'AGENTE_DISTINTO' ? '<p style="font-size:12px; color:#fbbf24; margin-top:6px;">⚠️ Folio de otro supervisor</p>' : ''}
+          </div>
+        </div>
+      </div>
+      
+      <div id="pv-seguimiento" style="display:none;">
+        <div class="form-group">
+          <label>Nota de avance</label>
+          <textarea id="pv-nota-avance" rows="2" placeholder="Qué se acordó, dónde quedó la conversación...">${cap.nota_avance || ''}</textarea>
+        </div>
+        <div class="form-group">
+          <label>Motivo del seguimiento</label>
+          <textarea id="pv-motivo-seg" rows="2" placeholder="Por qué no cerró ahora, qué se necesita...">${cap.motivo_seguimiento || ''}</textarea>
+        </div>
+        <div class="form-group">
+          <label>📅 Fecha del próximo contacto</label>
+          <input type="date" id="pv-fecha-prox" value="${cap.fecha_proximo_contacto || mananaStr}" min="${getFechaLocal(new Date())}">
+          <p style="font-size:11px; color:rgba(255,255,255,0.6); margin-top:4px;">El caso reaparecerá automáticamente este día.</p>
+        </div>
+      </div>
+      
+      <div style="background:rgba(16,185,129,0.06); border:1px solid rgba(16,185,129,0.2); border-radius:10px; padding:12px; margin-top:12px;">
+        <p style="font-size:13px; font-weight:600; margin-bottom:8px;">👥 Referidos</p>
+        <div class="form-group">
+          <select id="pv-tiene-ref" onchange="toggleRefField()">
+            <option value="false" ${!cap.tiene_referidos ? 'selected' : ''}>Sin referidos</option>
+            <option value="true" ${cap.tiene_referidos ? 'selected' : ''}>Con referidos</option>
+          </select>
+          <textarea id="pv-referidos" rows="2" placeholder="Nombre y teléfono de referidos" style="margin-top:8px; display:none;">${cap.referidos_texto || ''}</textarea>
+        </div>
+      </div>
+    </div>
+  `;
+  
+  document.getElementById('modal-actions').innerHTML = `
+    <button class="btn btn-secondary" onclick="renderModalPostVenta(currentEditActividad.act, currentEditActividad.cat)">← Volver</button>
+    <button class="btn btn-success" onclick="guardarCapturaPostventa()">💾 Guardar contacto</button>
+  `;
+  
+  togglePostventaCampos();
+  toggleRefField();
 }
 
 function togglePostventaCampos() {
@@ -1053,15 +1188,20 @@ function toggleRefField() {
 }
 
 async function guardarCapturaPostventa() {
-  const { actId, folio, ventaData } = capturaPostventaContext;
+  const ctx = capturaPostventaContext;
+  const { actId, folio, ventaData, esContinuacion, casoPadreId } = ctx;
+  
   const estatus = document.getElementById('pv-estatus').value;
   const canal = document.getElementById('pv-canal').value;
   
   if (!estatus) { alert('Selecciona el estatus del contacto'); return; }
   if (!canal) { alert('Selecciona el canal'); return; }
   
-  let tipificacion = null, motivoNC = null, notaAv = null, motivoSeg = null, tieneRef = false, refTexto = null;
+  let tipificacion = null, motivoNC = null, notaAv = null, motivoSeg = null;
+  let tieneRef = false, refTexto = null;
   let folioAdicional = null, validacionFolio = null;
+  let fechaProximo = null;
+  let casoCerrado = false;
   
   if (estatus === 'CONTACTADO') {
     tipificacion = document.getElementById('pv-tipificacion').value;
@@ -1070,24 +1210,42 @@ async function guardarCapturaPostventa() {
     if (tipificacion === 'VENTA_ADICIONAL') {
       folioAdicional = document.getElementById('pv-folio-adicional').value.trim().toUpperCase();
       if (!folioAdicional) { alert('Captura el folio de la venta adicional'); return; }
-      
-      // Marcar como PENDIENTE - se validará después cuando se actualice el informe-semanal
       validacionFolio = 'PENDIENTE';
+      casoCerrado = true; // venta cerrada
     }
     
     if (tipificacion === 'SEGUIMIENTO') {
       notaAv = document.getElementById('pv-nota-avance').value.trim();
       motivoSeg = document.getElementById('pv-motivo-seg').value.trim();
-      if (!notaAv) { alert('Captura la nota de avance del seguimiento'); return; }
+      fechaProximo = document.getElementById('pv-fecha-prox').value;
+      if (!notaAv) { alert('Captura la nota de avance'); return; }
       if (!motivoSeg) { alert('Captura el motivo del seguimiento'); return; }
+      if (!fechaProximo) { alert('Selecciona la fecha del próximo contacto'); return; }
+      casoCerrado = false; // seguimiento queda abierto
     }
+    
+    if (tipificacion === 'NO_INTERESA') {
+      casoCerrado = true; // cliente rechazó
+    }
+    
     tieneRef = document.getElementById('pv-tiene-ref').value === 'true';
     refTexto = tieneRef ? document.getElementById('pv-referidos').value.trim() : null;
     if (tieneRef && !refTexto) { alert('Captura los referidos o cambia a "sin referidos"'); return; }
   } else {
     motivoNC = document.getElementById('pv-motivo-nc').value;
     if (!motivoNC) { alert('Selecciona el motivo del no contacto'); return; }
+    casoCerrado = document.getElementById('pv-cerrar-nc')?.value === 'true';
   }
+  
+  // Determinar folio_padre y num_intento
+  const numIntentoActual = esContinuacion 
+    ? ((await sb.from('recurso_postventa').select('num_intento').eq('id', casoPadreId).single()).data?.num_intento || 1) + 1
+    : 1;
+  
+  const folioPadreVal = esContinuacion 
+    ? (await sb.from('recurso_postventa').select('folio_padre, folio').eq('id', casoPadreId).single()).data
+    : null;
+  const folioPadreFinal = folioPadreVal ? (folioPadreVal.folio_padre || folioPadreVal.folio) : folio;
   
   const payload = {
     bitacora_actividad_id: actId,
@@ -1106,18 +1264,31 @@ async function guardarCapturaPostventa() {
     tipificacion: tipificacion,
     nota_avance: notaAv,
     motivo_seguimiento: motivoSeg,
+    fecha_proximo_contacto: fechaProximo,
     tiene_referidos: tieneRef,
     referidos_texto: refTexto,
     folio_venta_adicional: folioAdicional,
     validacion_folio: validacionFolio,
-    fecha_validacion: validacionFolio ? new Date().toISOString() : null
+    fecha_validacion: validacionFolio ? new Date().toISOString() : null,
+    caso_cerrado: casoCerrado,
+    num_intento: numIntentoActual,
+    folio_padre: esContinuacion ? folioPadreFinal : null
   };
   
-  // Upsert
-  const { error } = await sb.from('recurso_postventa').upsert(payload, { onConflict: 'bitacora_actividad_id,folio' });
+  // Si es continuación, INSERT (nuevo registro). Si no, UPSERT por folio
+  let error;
+  if (esContinuacion) {
+    // Cerrar el caso padre
+    await sb.from('recurso_postventa').update({ caso_cerrado: true }).eq('id', casoPadreId);
+    // Insertar nuevo
+    ({ error } = await sb.from('recurso_postventa').insert(payload));
+  } else {
+    ({ error } = await sb.from('recurso_postventa').upsert(payload, { onConflict: 'bitacora_actividad_id,folio' }));
+  }
+  
   if (error) { alert('Error: ' + error.message); return; }
   
-  // Actualizar contador y estado en bitacora_actividad
+  // Actualizar contador en bitacora_actividad
   const { count: totalCapturados } = await sb.from('recurso_postventa').select('*', { count: 'exact', head: true }).eq('bitacora_actividad_id', actId);
   const { data: actUpdated } = await sb.from('bitacora_actividad').select('cantidad_objetivo').eq('id', actId).single();
   const total = actUpdated?.cantidad_objetivo || 0;
