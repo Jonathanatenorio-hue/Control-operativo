@@ -954,20 +954,32 @@ async function cargarCsvTipificacion() {
     
     logCsv(`   ✓ ${Object.keys(porAgente).length} agentes con candidatos`, 'success');
     
-    // 6. Identificar duplicados (si ya están en BD por re-carga del mismo archivo)
-    // Usamos cuenta+dn+fecha+sede como clave única (id_cc es el ID de campaña, no de llamada)
+    // 6. Identificar duplicados por TELÉFONO (DN) — un mismo cliente no se audita 2 veces
     logCsv('───────────────────────────────────────', '');
-    logCsv('6. Verificando duplicados...', 'info');
+    logCsv('6. Verificando duplicados por teléfono...', 'info');
     
-    // Cargar todos los registros existentes del día/sede para comparar
+    // Cargar todos los teléfonos existentes del día/sede
     const { data: existentes } = await sbBitacora.from('tipificacion_diaria')
-      .select('cuenta, dn')
+      .select('dn')
       .eq('fecha_cc', fecha)
       .eq('ubicacion', sede);
-    const clavesExistentes = new Set((existentes || []).map(e => `${e.cuenta}|${e.dn}`));
+    const dnsExistentes = new Set((existentes || []).map(e => e.dn));
     
-    const candidatosNuevos = candidatos.filter(c => !clavesExistentes.has(`${c.cuenta}|${c.dn}`));
-    logCsv(`   ${candidatosNuevos.length} nuevos · ${candidatos.length - candidatosNuevos.length} ya existían (se omiten)`, '');
+    // Filtrar duplicados de candidatos (entre el archivo y la BD)
+    // También filtrar duplicados DENTRO del mismo archivo (si trae el mismo DN 2 veces)
+    const dnsVistos = new Set();
+    const candidatosNuevos = [];
+    let duplicadosArchivo = 0;
+    
+    for (const c of candidatos) {
+      if (!c.dn) continue;
+      if (dnsExistentes.has(c.dn)) continue; // ya en BD
+      if (dnsVistos.has(c.dn)) { duplicadosArchivo++; continue; } // duplicado en el archivo
+      dnsVistos.add(c.dn);
+      candidatosNuevos.push(c);
+    }
+    
+    logCsv(`   ${candidatosNuevos.length} nuevos · ${dnsExistentes.size} ya existían · ${duplicadosArchivo} duplicados en archivo`, '');
     
     // 7. Insertar SOLO los nuevos (con upsert para tolerar duplicados)
     logCsv('7. Insertando candidatos nuevos...', 'info');
@@ -976,7 +988,7 @@ async function cargarCsvTipificacion() {
     for (let i = 0; i < candidatosNuevos.length; i += BATCH) {
       const lote = candidatosNuevos.slice(i, i + BATCH);
       const { error } = await sbBitacora.from('tipificacion_diaria')
-        .upsert(lote, { onConflict: 'cuenta,dn,fecha_cc,ubicacion', ignoreDuplicates: true });
+        .upsert(lote, { onConflict: 'dn,fecha_cc,ubicacion', ignoreDuplicates: true });
       if (error) { errores++; logCsv(`   ✗ Error lote ${i/BATCH + 1}: ${error.message}`, 'error'); }
       else insertados += lote.length;
     }
