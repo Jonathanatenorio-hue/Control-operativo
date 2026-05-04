@@ -1,0 +1,1359 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bitácora del Supervisor - ExpertCell</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #0d1421 0%, #1a2942 50%, #0d1421 100%); min-height: 100vh; color: #fff; }
+
+  /* LOGIN */
+  .login-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+  .login-box { background: rgba(255,255,255,0.05); border: 1px solid rgba(0, 168, 225, 0.3); border-radius: 20px; padding: 40px; width: 100%; max-width: 420px; backdrop-filter: blur(20px); }
+  .login-logo { text-align: center; margin-bottom: 32px; }
+  .login-logo h1 { font-size: 24px; font-weight: 700; margin-bottom: 6px; }
+  .login-logo p { font-size: 13px; color: rgba(255,255,255,0.6); letter-spacing: 1px; text-transform: uppercase; }
+  .login-logo .accent { display: inline-block; width: 8px; height: 8px; background: #00a8e1; border-radius: 50%; margin-right: 8px; box-shadow: 0 0 12px #00a8e1; }
+  .form-group { margin-bottom: 16px; }
+  .form-group label { display: block; font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.7); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 1px; }
+  .form-group input, .form-group select, .form-group textarea { width: 100%; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 10px; padding: 12px 14px; color: #fff; font-size: 14px; outline: none; transition: all 0.2s; font-family: inherit; }
+  .form-group input:focus, .form-group select:focus, .form-group textarea:focus { border-color: #00a8e1; background: rgba(0, 168, 225, 0.08); }
+  .btn { background: linear-gradient(135deg, #00a8e1, #0086b3); color: white; border: none; padding: 14px 24px; border-radius: 10px; font-size: 14px; font-weight: 600; cursor: pointer; width: 100%; transition: all 0.2s; }
+  .btn:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(0, 168, 225, 0.4); }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+  .btn-secondary { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); }
+  .btn-danger { background: linear-gradient(135deg, #ef4444, #b91c1c); }
+  .btn-success { background: linear-gradient(135deg, #10b981, #059669); }
+  .error-msg { color: #fca5a5; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; display: none; }
+  .error-msg.show { display: block; }
+
+  /* APP */
+  .app { display: none; }
+  .app.show { display: block; }
+  .header { background: rgba(255,255,255,0.04); border-bottom: 1px solid rgba(255,255,255,0.08); padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; position: sticky; top: 0; z-index: 100; backdrop-filter: blur(20px); }
+  .header-left { display: flex; align-items: center; gap: 16px; }
+  .user-avatar { width: 44px; height: 44px; background: linear-gradient(135deg, #00a8e1, #0086b3); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 16px; }
+  .user-info h2 { font-size: 16px; font-weight: 700; }
+  .user-info p { font-size: 12px; color: rgba(255,255,255,0.6); }
+  .header-right { display: flex; align-items: center; gap: 12px; }
+  .score-badge { background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.4); padding: 6px 12px; border-radius: 100px; font-size: 13px; font-weight: 600; }
+  .score-badge.warning { background: rgba(245, 158, 11, 0.15); border-color: rgba(245, 158, 11, 0.4); color: #fbbf24; }
+  .score-badge.danger { background: rgba(239, 68, 68, 0.15); border-color: rgba(239, 68, 68, 0.4); color: #fca5a5; }
+  .logout-btn { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: rgba(255,255,255,0.7); padding: 8px 12px; border-radius: 8px; cursor: pointer; font-size: 12px; }
+
+  .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
+
+  /* TABS */
+  .tabs { display: flex; gap: 8px; margin-bottom: 24px; border-bottom: 1px solid rgba(255,255,255,0.08); overflow-x: auto; }
+  .tab { padding: 12px 20px; background: none; border: none; color: rgba(255,255,255,0.6); font-size: 14px; font-weight: 500; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.2s; white-space: nowrap; }
+  .tab:hover { color: #fff; }
+  .tab.active { color: #00a8e1; border-bottom-color: #00a8e1; }
+
+  /* DAY BANNER */
+  .day-banner { background: linear-gradient(135deg, rgba(0, 168, 225, 0.15), rgba(0, 168, 225, 0.05)); border: 1px solid rgba(0, 168, 225, 0.4); border-radius: 16px; padding: 20px 24px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }
+  .day-info h3 { font-size: 18px; margin-bottom: 4px; }
+  .day-info p { font-size: 13px; color: rgba(255,255,255,0.7); }
+  .clock-info { display: flex; gap: 12px; flex-wrap: wrap; }
+  .clock-pill { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; border-radius: 100px; font-size: 12px; display: flex; align-items: center; gap: 6px; }
+  .clock-pill.alert { background: rgba(245, 158, 11, 0.15); border-color: rgba(245, 158, 11, 0.4); color: #fbbf24; }
+  .clock-pill.danger { background: rgba(239, 68, 68, 0.15); border-color: rgba(239, 68, 68, 0.4); color: #fca5a5; }
+
+  /* PROGRESS */
+  .progress-container { background: rgba(255,255,255,0.04); border-radius: 12px; padding: 16px 20px; margin-bottom: 24px; }
+  .progress-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-size: 13px; }
+  .progress-bar { height: 8px; background: rgba(255,255,255,0.08); border-radius: 100px; overflow: hidden; }
+  .progress-fill { height: 100%; background: linear-gradient(90deg, #00a8e1, #00d4ff); width: 0%; transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1); box-shadow: 0 0 10px rgba(0, 168, 225, 0.6); }
+
+  /* ASISTENCIA SCREEN */
+  .asistencia-screen { background: rgba(255,255,255,0.04); border: 1px solid rgba(0, 168, 225, 0.3); border-radius: 16px; padding: 24px; margin-bottom: 24px; }
+  .asistencia-screen h2 { font-size: 18px; margin-bottom: 8px; }
+  .asistencia-screen .desc { font-size: 13px; color: rgba(255,255,255,0.7); margin-bottom: 20px; }
+  .asistencia-stats { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+  .stat-mini { background: rgba(255,255,255,0.04); padding: 10px 16px; border-radius: 10px; font-size: 13px; }
+  .stat-mini strong { color: #00a8e1; font-size: 18px; }
+  .agentes-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 8px; margin-bottom: 24px; max-height: 600px; overflow-y: auto; padding: 4px; }
+  .agente-row { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; gap: 10px; transition: all 0.2s; }
+  .agente-row.presente { background: rgba(16, 185, 129, 0.1); border-color: rgba(16, 185, 129, 0.4); }
+  .agente-row.falta { background: rgba(239, 68, 68, 0.08); border-color: rgba(239, 68, 68, 0.3); opacity: 0.7; }
+  .agente-row .nombre { font-weight: 500; font-size: 14px; }
+  .toggle-group { display: flex; gap: 4px; }
+  .toggle-btn { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: rgba(255,255,255,0.7); padding: 6px 12px; border-radius: 6px; font-size: 11px; cursor: pointer; font-weight: 600; }
+  .toggle-btn.active.presente { background: #10b981; color: white; border-color: #10b981; }
+  .toggle-btn.active.falta { background: #ef4444; color: white; border-color: #ef4444; }
+
+  /* ACTIVIDADES GRID */
+  .activities-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+  .activity-card { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); border-radius: 14px; padding: 18px; transition: all 0.2s; cursor: pointer; position: relative; }
+  .activity-card:hover { transform: translateY(-2px); border-color: rgba(0, 168, 225, 0.5); }
+  .activity-card.completada { background: linear-gradient(135deg, rgba(16, 185, 129, 0.12), rgba(16, 185, 129, 0.04)); border-color: rgba(16, 185, 129, 0.4); }
+  .activity-card.parcial { background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(245, 158, 11, 0.04)); border-color: rgba(245, 158, 11, 0.4); }
+  .activity-card.no-aplica { opacity: 0.4; cursor: not-allowed; }
+  .activity-card.bandera-amarilla { border-color: rgba(245, 158, 11, 0.6); box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.15); }
+  .activity-card.bandera-roja { border-color: rgba(239, 68, 68, 0.6); box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.15); }
+  .card-header-row { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; gap: 10px; }
+  .card-num { background: linear-gradient(135deg, #00a8e1, #0086b3); color: #fff; width: 28px; height: 28px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; flex-shrink: 0; }
+  .card-status { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .status-pendiente { background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.7); }
+  .status-completada { background: rgba(16, 185, 129, 0.2); color: #6ee7b7; }
+  .status-parcial { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+  .status-no-aplica { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.4); }
+  .card-title { font-size: 15px; font-weight: 700; margin-bottom: 6px; line-height: 1.3; }
+  .card-meta { font-size: 12px; color: rgba(255,255,255,0.6); line-height: 1.4; margin-bottom: 12px; }
+  .card-progress { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.08); font-size: 12px; color: rgba(255,255,255,0.7); display: flex; justify-content: space-between; align-items: center; }
+  .card-bandera { margin-top: 8px; font-size: 11px; padding: 4px 8px; border-radius: 6px; display: inline-block; }
+  .bandera-amarilla-tag { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+  .bandera-roja-tag { background: rgba(239, 68, 68, 0.2); color: #fca5a5; }
+
+  /* MODAL */
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.8); display: none; align-items: center; justify-content: center; z-index: 1000; backdrop-filter: blur(8px); padding: 20px; }
+  .modal-overlay.show { display: flex; }
+  .modal { background: linear-gradient(135deg, #1a2942, #0d1421); border: 1px solid rgba(0, 168, 225, 0.4); border-radius: 20px; width: 100%; max-width: 600px; max-height: 90vh; overflow-y: auto; padding: 28px; animation: modalIn 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+  @keyframes modalIn { from { opacity: 0; transform: scale(0.95) translateY(10px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+  .modal-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+  .modal-title { font-size: 18px; font-weight: 700; line-height: 1.3; flex: 1; }
+  .modal-desc { font-size: 13px; color: rgba(255,255,255,0.7); margin-top: 6px; line-height: 1.5; }
+  .modal-close { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: #fff; width: 32px; height: 32px; border-radius: 8px; cursor: pointer; font-size: 18px; }
+  .modal-body { margin-bottom: 20px; }
+  .modal-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  .modal-actions .btn { flex: 1; min-width: 140px; }
+
+  /* EVIDENCE LIST */
+  .evidence-list { margin-top: 16px; max-height: 300px; overflow-y: auto; }
+  .evidence-item { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 12px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+  .evidence-content { flex: 1; }
+  .evidence-content p { font-size: 13px; margin-bottom: 4px; }
+  .evidence-content small { font-size: 11px; color: rgba(255,255,255,0.5); }
+  .evidence-delete { background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #fca5a5; padding: 4px 8px; border-radius: 6px; cursor: pointer; font-size: 11px; }
+
+  /* HISTORY */
+  .history-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-bottom: 20px; }
+  .history-stat { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 18px; }
+  .history-stat .label { font-size: 11px; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .history-stat .value { font-size: 28px; font-weight: 700; color: #00a8e1; }
+  .history-stat .sub { font-size: 12px; color: rgba(255,255,255,0.5); margin-top: 4px; }
+  .history-table { background: rgba(255,255,255,0.04); border-radius: 12px; overflow: hidden; }
+  .history-table table { width: 100%; border-collapse: collapse; }
+  .history-table th, .history-table td { padding: 12px 16px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 13px; }
+  .history-table th { background: rgba(255,255,255,0.04); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: rgba(255,255,255,0.6); }
+
+  .empty-state { text-align: center; padding: 60px 20px; color: rgba(255,255,255,0.5); }
+  .loader { display: inline-block; width: 18px; height: 18px; border: 2px solid rgba(255,255,255,0.2); border-top-color: #00a8e1; border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .close-day-zone { margin-top: 32px; padding: 24px; background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 16px; text-align: center; }
+  .close-day-zone h3 { margin-bottom: 8px; font-size: 16px; }
+  .close-day-zone p { font-size: 13px; color: rgba(255,255,255,0.7); margin-bottom: 16px; }
+
+  @media (max-width: 768px) {
+    .container { padding: 16px; }
+    .header { padding: 12px 16px; }
+    .activities-grid { grid-template-columns: 1fr; }
+    .agentes-list { grid-template-columns: 1fr; }
+    .day-banner { flex-direction: column; align-items: flex-start; }
+  }
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div class="login-screen" id="login-screen">
+  <div class="login-box">
+    <div class="login-logo">
+      <h1><span class="accent"></span>Bitácora del Supervisor</h1>
+      <p>ExpertCell</p>
+    </div>
+    <div class="error-msg" id="login-error"></div>
+    <div class="form-group">
+      <label>Email</label>
+      <input type="email" id="email" placeholder="tu@expertcell.mx">
+    </div>
+    <div class="form-group">
+      <label>Contraseña</label>
+      <input type="password" id="password">
+    </div>
+    <button class="btn" id="login-btn" onclick="login()">Ingresar</button>
+  </div>
+</div>
+
+<!-- APP -->
+<div class="app" id="app">
+  <div class="header">
+    <div class="header-left">
+      <div class="user-avatar" id="user-avatar">--</div>
+      <div class="user-info">
+        <h2 id="user-name">--</h2>
+        <p id="user-meta">--</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="score-badge" id="score-badge">Score: 100%</div>
+      <button class="logout-btn" onclick="logout()">Salir</button>
+    </div>
+  </div>
+
+  <div class="container">
+    <div id="demo-banner" style="display:none; background: linear-gradient(135deg, rgba(245, 158, 11, 0.2), rgba(245, 158, 11, 0.1)); border: 1px solid rgba(245, 158, 11, 0.5); border-radius: 12px; padding: 12px 18px; margin-bottom: 20px; font-size: 13px; color: #fbbf24; text-align: center;">
+      🧪 <strong>MODO DEMO ACTIVO</strong> · Validaciones de domingo desactivadas · No usar en producción
+    </div>
+    <div class="tabs">
+      <button class="tab active" id="tab-btn-hoy" onclick="changeTab('hoy')">Mi día</button>
+      <button class="tab" id="tab-btn-historial" onclick="changeTab('historial')">Mi historial</button>
+    </div>
+
+    <!-- TAB HOY -->
+    <div id="tab-hoy">
+      <div class="day-banner">
+        <div class="day-info">
+          <h3 id="dia-titulo">--</h3>
+          <p id="dia-meta">--</p>
+        </div>
+        <div class="clock-info" id="clock-info"></div>
+      </div>
+
+      <!-- ASISTENCIA (se muestra primero, antes de las actividades) -->
+      <div class="asistencia-screen" id="asistencia-screen" style="display:none;">
+        <h2>👥 Pase de asistencia</h2>
+        <p class="desc">Marca quién está presente hoy. Las cuotas de auditoría se calcularán solo sobre los presentes. <strong>Una vez confirmes, ya no podrás cambiar la asistencia del día.</strong></p>
+        <div class="asistencia-stats" id="asistencia-stats"></div>
+        <div class="agentes-list" id="agentes-list"></div>
+        <button class="btn btn-success" id="confirm-asistencia-btn" onclick="confirmarAsistencia()">Confirmar asistencia y comenzar día</button>
+      </div>
+
+      <!-- ACTIVIDADES (se muestran después de confirmar asistencia) -->
+      <div id="actividades-area" style="display:none;">
+        <div class="progress-container">
+          <div class="progress-row">
+            <span>Progreso del día</span>
+            <span id="progress-text">0 / 0</span>
+          </div>
+          <div class="progress-bar">
+            <div class="progress-fill" id="progress-fill"></div>
+          </div>
+        </div>
+        <div class="activities-grid" id="activities-grid"></div>
+        <div class="close-day-zone" id="close-day-zone" style="display:none;">
+          <h3>¿Cierre de día?</h3>
+          <p>Una vez cerrado, NO se puede editar nada. Asegúrate de haber capturado todas las actividades.</p>
+          <button class="btn btn-danger" onclick="cerrarDia()">Cerrar día y bloquear</button>
+        </div>
+      </div>
+
+      <!-- DOMINGO o sin agentes -->
+      <div id="empty-day" style="display:none;"></div>
+    </div>
+
+    <!-- TAB HISTORIAL -->
+    <div id="tab-historial" style="display:none;">
+      <div class="history-grid" id="history-grid"></div>
+      <div class="history-table" id="history-table"></div>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL -->
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title" id="modal-title">--</div>
+        <div class="modal-desc" id="modal-desc">--</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-actions" id="modal-actions"></div>
+  </div>
+</div>
+
+<script>
+// ============================================================================
+// CONFIG
+// ============================================================================
+const SUPABASE_URL = 'https://xorzmzdviiogmjdmsvai.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhvcnptemR2aWlvZ21qZG1zdmFpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4Mjg0MzgsImV4cCI6MjA5MzQwNDQzOH0.Ya-E12GkiTYcvIwQR2lpgfVyEhN_Vfwh0_OaLkybulY';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// Cliente del informe-semanal (solo lectura para post-venta)
+const SB_INFORME = 'https://hfvbekuerjjigtdekllh.supabase.co';
+const KEY_INFORME = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhmdmJla3VlcmpqaWd0ZGVrbGxoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY4MDIwMDMsImV4cCI6MjA5MjM3ODAwM30.og9ZKhXmDQjA4V4q2V4ikeYFAjxs9IQc4M-43BuIjB4';
+const sbInforme = supabase.createClient(SB_INFORME, KEY_INFORME);
+
+// MODO DEMO: agregar ?demo=1 a la URL para ignorar validaciones de día
+const DEMO_MODE = new URLSearchParams(window.location.search).get('demo') === '1';
+if (DEMO_MODE) console.log('🧪 MODO DEMO ACTIVO - Validaciones de domingo desactivadas');
+
+// ============================================================================
+// STATE
+// ============================================================================
+let currentSupervisor = null;
+let currentBitacora = null;
+let actividadesCatalogo = [];
+let bitacoraActividades = [];
+let agentesActivos = [];
+let asistenciaPendiente = {}; // { agente_id: 'PRESENTE' | 'FALTA' }
+let agentesPresentesIds = [];
+let currentEditActividad = null;
+
+// ============================================================================
+// AUTH
+// ============================================================================
+async function login() {
+  const email = document.getElementById('email').value.trim().toLowerCase();
+  const password = document.getElementById('password').value;
+  const errorEl = document.getElementById('login-error');
+  const btn = document.getElementById('login-btn');
+  errorEl.classList.remove('show');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="loader"></span>';
+  try {
+    const { data, error } = await sb.from('supervisores').select('*, coordinadores(nombre)').eq('email', email).eq('activo', true).maybeSingle();
+    if (error) throw error;
+    if (!data) { errorEl.textContent = 'Email no encontrado o cuenta inactiva'; errorEl.classList.add('show'); return; }
+    if (data.password_hash !== password) { errorEl.textContent = 'Contraseña incorrecta'; errorEl.classList.add('show'); return; }
+    currentSupervisor = data;
+    sessionStorage.setItem('supervisor', JSON.stringify(data));
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('app').classList.add('show');
+    initApp();
+  } catch (err) { console.error(err); errorEl.textContent = 'Error de conexión'; errorEl.classList.add('show');
+  } finally { btn.disabled = false; btn.innerHTML = 'Ingresar'; }
+}
+
+function logout() { sessionStorage.clear(); location.reload(); }
+
+// ============================================================================
+// INIT
+// ============================================================================
+async function initApp() {
+  if (DEMO_MODE) document.getElementById('demo-banner').style.display = 'block';
+  document.getElementById('user-avatar').textContent = currentSupervisor.nombre.charAt(0).toUpperCase();
+  document.getElementById('user-name').textContent = currentSupervisor.nombre;
+  document.getElementById('user-meta').textContent = `Supervisor · ${currentSupervisor.ubicacion} · Coord: ${currentSupervisor.coordinadores?.nombre || '—'}`;
+  updateScoreBadge();
+  await loadActividadesCatalogo();
+  await loadBitacoraHoy();
+  startClock();
+}
+
+function updateScoreBadge() {
+  const score = parseFloat(currentSupervisor.score_confiabilidad || 100);
+  const badge = document.getElementById('score-badge');
+  badge.textContent = `Score: ${score.toFixed(0)}%`;
+  badge.className = 'score-badge';
+  if (score < 70) badge.classList.add('danger');
+  else if (score < 85) badge.classList.add('warning');
+}
+
+async function loadActividadesCatalogo() {
+  const { data } = await sb.from('actividades_catalogo').select('*').order('orden');
+  actividadesCatalogo = data || [];
+}
+
+// ============================================================================
+// BITÁCORA DEL DÍA
+// ============================================================================
+async function loadBitacoraHoy() {
+  const hoy = new Date().toISOString().split('T')[0];
+  const diaSemana = DEMO_MODE ? 1 : new Date().getDay(); // En demo, simulamos lunes
+  
+  // Domingo (no aplica en modo demo)
+  if (diaSemana === 0) {
+    document.getElementById('asistencia-screen').style.display = 'none';
+    document.getElementById('actividades-area').style.display = 'none';
+    document.getElementById('empty-day').innerHTML = `<div class="empty-state"><h3 style="font-size:20px; margin-bottom:8px;">🌴 Domingo libre</h3><p>No se requiere bitácora hoy. Disfruta tu día.</p></div>`;
+    document.getElementById('empty-day').style.display = 'block';
+    document.getElementById('dia-titulo').textContent = 'Domingo';
+    document.getElementById('dia-meta').textContent = 'Día libre';
+    return;
+  }
+
+  // Cargar agentes activos del supervisor
+  const { data: agentes } = await sb.from('agentes').select('*').eq('supervisor_id', currentSupervisor.id).eq('activo', true).order('nombre');
+  agentesActivos = agentes || [];
+
+  if (agentesActivos.length === 0) {
+    document.getElementById('asistencia-screen').style.display = 'none';
+    document.getElementById('actividades-area').style.display = 'none';
+    document.getElementById('empty-day').innerHTML = `<div class="empty-state"><h3 style="font-size:20px; margin-bottom:8px; color:#fbbf24;">⚠️ Sin agentes asignados</h3><p>No hay agentes activos asignados a tu equipo.<br>Contacta a tu coordinador o director para sincronizar la plantilla.</p></div>`;
+    document.getElementById('empty-day').style.display = 'block';
+    return;
+  }
+  document.getElementById('empty-day').style.display = 'none';
+
+  // Buscar bitácora existente
+  let { data: bit } = await sb.from('bitacora_diaria').select('*').eq('supervisor_id', currentSupervisor.id).eq('fecha', hoy).maybeSingle();
+
+  if (!bit) {
+    // Crear bitácora del día
+    const { data: bitId } = await sb.rpc('crear_bitacora_dia', { 
+      p_supervisor_id: currentSupervisor.id, 
+      p_agentes_dia: 0,
+      p_demo: DEMO_MODE
+    });
+    if (!bitId) return;
+    const reload = await sb.from('bitacora_diaria').select('*').eq('id', bitId).single();
+    bit = reload.data;
+  }
+  currentBitacora = bit;
+
+  // Verificar si ya hay asistencia capturada
+  const { data: asist } = await sb.from('asistencia_diaria').select('*').eq('bitacora_id', bit.id);
+  
+  if (!asist || asist.length === 0) {
+    // Mostrar pantalla de asistencia
+    mostrarAsistencia();
+  } else {
+    // Asistencia ya capturada, ir a actividades
+    agentesPresentesIds = asist.filter(a => a.estado === 'PRESENTE').map(a => a.agente_id);
+    await loadActivities();
+  }
+  renderDayBanner();
+}
+
+function renderDayBanner() {
+  const fecha = new Date();
+  const opciones = { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' };
+  document.getElementById('dia-titulo').textContent = fecha.toLocaleDateString('es-MX', opciones).replace(/^\w/, c => c.toUpperCase());
+  const tipoDiaTxt = currentBitacora.tipo_dia === 'SABADO' ? 'Sábado · 6 actividades aplicables' : 'Lunes-Viernes · 13 actividades aplicables';
+  const agentesTxt = agentesPresentesIds.length > 0 ? `${agentesPresentesIds.length} presentes` : `${agentesActivos.length} agentes en plantilla`;
+  document.getElementById('dia-meta').textContent = `${tipoDiaTxt} · ${agentesTxt}`;
+}
+
+// ============================================================================
+// ASISTENCIA
+// ============================================================================
+function mostrarAsistencia() {
+  document.getElementById('asistencia-screen').style.display = 'block';
+  document.getElementById('actividades-area').style.display = 'none';
+  
+  // Inicializar todos como PRESENTE por default
+  asistenciaPendiente = {};
+  agentesActivos.forEach(a => { asistenciaPendiente[a.id] = 'PRESENTE'; });
+  
+  renderAsistencia();
+}
+
+function renderAsistencia() {
+  const list = document.getElementById('agentes-list');
+  list.innerHTML = '';
+  
+  agentesActivos.forEach(ag => {
+    const estado = asistenciaPendiente[ag.id] || 'PRESENTE';
+    const row = document.createElement('div');
+    row.className = `agente-row ${estado.toLowerCase()}`;
+    row.innerHTML = `
+      <div class="nombre">${ag.nombre}</div>
+      <div class="toggle-group">
+        <button class="toggle-btn presente ${estado === 'PRESENTE' ? 'active' : ''}" onclick="setAsistencia('${ag.id}', 'PRESENTE')">✓ Presente</button>
+        <button class="toggle-btn falta ${estado === 'FALTA' ? 'active' : ''}" onclick="setAsistencia('${ag.id}', 'FALTA')">✗ Falta</button>
+      </div>
+    `;
+    list.appendChild(row);
+  });
+  
+  // Stats
+  const presentes = Object.values(asistenciaPendiente).filter(e => e === 'PRESENTE').length;
+  const faltas = Object.values(asistenciaPendiente).filter(e => e === 'FALTA').length;
+  document.getElementById('asistencia-stats').innerHTML = `
+    <div class="stat-mini">Total plantilla: <strong>${agentesActivos.length}</strong></div>
+    <div class="stat-mini">Presentes: <strong style="color:#10b981;">${presentes}</strong></div>
+    <div class="stat-mini">Faltas: <strong style="color:#ef4444;">${faltas}</strong></div>
+  `;
+}
+
+function setAsistencia(agenteId, estado) {
+  asistenciaPendiente[agenteId] = estado;
+  renderAsistencia();
+}
+
+async function confirmarAsistencia() {
+  const presentes = Object.values(asistenciaPendiente).filter(e => e === 'PRESENTE').length;
+  if (presentes === 0) { alert('Debes tener al menos 1 agente presente para iniciar el día.'); return; }
+  if (!confirm(`Confirmas: ${presentes} presentes y ${agentesActivos.length - presentes} faltas? Esto NO se puede cambiar después.`)) return;
+  
+  const btn = document.getElementById('confirm-asistencia-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="loader"></span> Guardando...';
+  
+  try {
+    // Insertar asistencias
+    const hoy = new Date().toISOString().split('T')[0];
+    const inserts = agentesActivos.map(ag => ({
+      bitacora_id: currentBitacora.id,
+      agente_id: ag.id,
+      supervisor_id: currentSupervisor.id,
+      fecha: hoy,
+      estado: asistenciaPendiente[ag.id]
+    }));
+    const { error } = await sb.from('asistencia_diaria').insert(inserts);
+    if (error) throw error;
+    
+    // Calcular cuotas
+    await sb.rpc('cerrar_asistencia_y_calcular_cuotas', { p_bitacora_id: currentBitacora.id });
+    
+    // Recargar
+    agentesPresentesIds = agentesActivos.filter(a => asistenciaPendiente[a.id] === 'PRESENTE').map(a => a.id);
+    document.getElementById('asistencia-screen').style.display = 'none';
+    await loadActivities();
+    renderDayBanner();
+  } catch (err) {
+    alert('Error: ' + err.message);
+    btn.disabled = false;
+    btn.innerHTML = 'Confirmar asistencia y comenzar día';
+  }
+}
+
+// ============================================================================
+// ACTIVIDADES
+// ============================================================================
+async function loadActivities() {
+  document.getElementById('actividades-area').style.display = 'block';
+  
+  // Recargar bitácora (ya con agentes_dia actualizado)
+  const { data: bit } = await sb.from('bitacora_diaria').select('*').eq('id', currentBitacora.id).single();
+  currentBitacora = bit;
+  
+  const { data: acts } = await sb.from('bitacora_actividad').select('*').eq('bitacora_id', currentBitacora.id).order('actividad_id');
+  bitacoraActividades = acts || [];
+  renderActivities();
+}
+
+function startClock() { setInterval(updateClockInfo, 30000); updateClockInfo(); }
+
+function updateClockInfo() {
+  const ahora = new Date();
+  const h = ahora.getHours();
+  const m = ahora.getMinutes();
+  const tiempo = h * 60 + m;
+  const hito1 = 9 * 60 + 45;
+  const hito2 = 9 * 60 + 50;
+  const hito3 = 10 * 60 + 5;
+  let pills = [`<div class="clock-pill">🕐 ${ahora.toLocaleTimeString('es-MX', {hour:'2-digit',minute:'2-digit'})}</div>`];
+  if (tiempo < hito1) pills.push(`<div class="clock-pill">⚙️ Herramientas: antes 9:45</div>`);
+  else pills.push(`<div class="clock-pill ${tiempo > hito1 + 30 ? 'danger' : 'alert'}">⚠️ 9:45 superado</div>`);
+  if (tiempo < hito2) pills.push(`<div class="clock-pill">👥 Junta inicio: 9:50</div>`);
+  else if (tiempo < hito3) pills.push(`<div class="clock-pill alert">👥 Reunión 9:50-10:05</div>`);
+  document.getElementById('clock-info').innerHTML = pills.join('');
+}
+
+function renderActivities() {
+  const grid = document.getElementById('activities-grid');
+  grid.innerHTML = '';
+  let aplicables = 0, completadas = 0;
+  
+  bitacoraActividades.forEach(act => {
+    const cat = actividadesCatalogo.find(c => c.id === act.actividad_id);
+    if (!cat) return;
+    if (act.estado !== 'NO_APLICA') aplicables++;
+    if (act.estado === 'COMPLETADA') completadas++;
+    
+    const cardClass = ['activity-card'];
+    if (act.estado === 'COMPLETADA') cardClass.push('completada');
+    if (act.estado === 'PARCIAL') cardClass.push('parcial');
+    if (act.estado === 'NO_APLICA') cardClass.push('no-aplica');
+    if (act.bandera === 'AMARILLA') cardClass.push('bandera-amarilla');
+    if (act.bandera === 'ROJA') cardClass.push('bandera-roja');
+    
+    let metaTxt = '';
+    if (cat.cuota_tipo === 'POR_AGENTE') metaTxt = `${cat.cuota_valor} por agente · Meta: ${act.cantidad_objetivo}`;
+    else if (cat.cuota_tipo === 'PORCENTAJE') metaTxt = `Revisar 100% del reporte`;
+    else if (cat.cuota_tipo === 'TIMESTAMP') {
+      if (cat.hora_limite) metaTxt = `Hora límite: ${cat.hora_limite.substring(0,5)}`;
+      else if (cat.hora_minima) metaTxt = `Horario: ${cat.hora_minima.substring(0,5)} - ${cat.hora_maxima ? cat.hora_maxima.substring(0,5) : '...'}`;
+    }
+    
+    let progressTxt = '';
+    if (cat.cuota_tipo === 'POR_AGENTE') {
+      progressTxt = `<div class="card-progress"><span>Avance</span><span><strong>${act.cantidad_realizada}</strong> / ${act.cantidad_objetivo}</span></div>`;
+    } else if (cat.cuota_tipo === 'PORCENTAJE') {
+      // Para reportes: mostrar casos capturados, no porcentaje engañoso
+      if (act.estado === 'COMPLETADA') {
+        progressTxt = `<div class="card-progress"><span>Estado</span><span><strong style="color:#10b981;">100% revisado ✓</strong></span></div>`;
+      } else {
+        progressTxt = `<div class="card-progress"><span>Casos capturados</span><span><strong>${act.cantidad_realizada}</strong></span></div>`;
+      }
+    } else if (cat.cuota_tipo === 'TIMESTAMP' && act.timestamp_marcado) {
+      const t = new Date(act.timestamp_marcado);
+      progressTxt = `<div class="card-progress"><span>Marcado a las</span><span><strong>${t.toLocaleTimeString('es-MX', {hour:'2-digit',minute:'2-digit'})}</strong></span></div>`;
+    }
+    
+    let banderaTxt = '';
+    if (act.bandera === 'AMARILLA') banderaTxt = `<div class="card-bandera bandera-amarilla-tag">⚠️ ${act.motivo_bandera || 'Bandera amarilla'}</div>`;
+    if (act.bandera === 'ROJA') banderaTxt = `<div class="card-bandera bandera-roja-tag">🚩 ${act.motivo_bandera || 'Bandera roja'}</div>`;
+    
+    const card = document.createElement('div');
+    card.className = cardClass.join(' ');
+    card.innerHTML = `
+      <div class="card-header-row">
+        <div class="card-num">${cat.orden}</div>
+        <div class="card-status status-${act.estado.toLowerCase().replace('_','-')}">${act.estado.replace('_',' ')}</div>
+      </div>
+      <div class="card-title">${cat.titulo}</div>
+      <div class="card-meta">${metaTxt}</div>
+      ${progressTxt}
+      ${banderaTxt}
+    `;
+    if (act.estado !== 'NO_APLICA' && currentBitacora.estado !== 'CERRADO') {
+      card.onclick = () => abrirActividad(act.id);
+    }
+    grid.appendChild(card);
+  });
+  
+  document.getElementById('progress-text').textContent = `${completadas} / ${aplicables}`;
+  document.getElementById('progress-fill').style.width = aplicables > 0 ? `${(completadas/aplicables)*100}%` : '0%';
+  
+  const ahora = new Date();
+  const horaActual = ahora.getHours() * 60 + ahora.getMinutes();
+  const closeZone = document.getElementById('close-day-zone');
+  closeZone.style.display = (currentBitacora.estado === 'ABIERTO' && horaActual >= 19 * 60 + 30) ? 'block' : 'none';
+}
+
+// ============================================================================
+// MODAL DE CAPTURA
+// ============================================================================
+async function abrirActividad(bitacoraActividadId) {
+  const act = bitacoraActividades.find(a => a.id === bitacoraActividadId);
+  const cat = actividadesCatalogo.find(c => c.id === act.actividad_id);
+  currentEditActividad = { act, cat };
+  document.getElementById('modal-title').textContent = `${cat.orden}. ${cat.titulo}`;
+  document.getElementById('modal-desc').textContent = cat.descripcion;
+  
+  const { data: evs } = await sb.from('evidencias').select('*, agentes(nombre)').eq('bitacora_actividad_id', act.id);
+  
+  if (cat.tipo === 'HABITO') renderModalHabito(act, cat);
+  else if (cat.codigo === 'RECURSO_POSTVENTA') await renderModalPostVenta(act, cat);
+  else if (cat.cuota_tipo === 'POR_AGENTE') renderModalAuditoria(act, cat, evs);
+  else renderModalReporte(act, cat, evs);
+  
+  document.getElementById('modal-overlay').classList.add('show');
+}
+
+function renderModalHabito(act, cat) {
+  const ahora = new Date();
+  const horaTxt = ahora.toLocaleTimeString('es-MX', {hour:'2-digit',minute:'2-digit'});
+  let warning = '';
+  
+  if (cat.codigo === 'HERRAMIENTAS_LISTAS') {
+    if (ahora.getHours() * 60 + ahora.getMinutes() > 9 * 60 + 45) warning = '<div class="error-msg show">⚠️ Ya pasaron las 9:45 AM. Si marcas ahora, se generará bandera amarilla.</div>';
+  } else if (cat.codigo === 'REUNION_INICIO') {
+    const t = ahora.getHours() * 60 + ahora.getMinutes();
+    if (t < 9 * 60 + 50) warning = '<div class="error-msg show">⚠️ Aún no es hora (9:50 AM)</div>';
+    else if (t > 10 * 60 + 5) warning = '<div class="error-msg show">⚠️ Ya pasaron las 10:05 AM. Bandera amarilla automática.</div>';
+  } else if (cat.codigo === 'REUNION_CIERRE') {
+    const t = ahora.getHours() * 60 + ahora.getMinutes();
+    if (t < 14 * 60) warning = '<div class="error-msg show">⚠️ Muy temprano. Reunión de cierre: después de comida o 6:50-7:00 PM.</div>';
+  }
+  
+  let extraField = '';
+  if (cat.codigo === 'REUNION_INICIO' || cat.codigo === 'REUNION_CIERRE') {
+    extraField = `<div class="form-group"><label>3 puntos clave tratados (obligatorio)</label><textarea id="comentarios-input" rows="4" placeholder="1. ...\n2. ...\n3. ...">${act.comentarios || ''}</textarea></div>`;
+  }
+  
+  document.getElementById('modal-body').innerHTML = `${warning}<p style="margin-bottom:16px; color:rgba(255,255,255,0.8);">Hora actual: <strong>${horaTxt}</strong><br>${act.timestamp_marcado ? `Ya marcaste a las <strong>${new Date(act.timestamp_marcado).toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'})}</strong>` : ''}</p>${extraField}`;
+  document.getElementById('modal-actions').innerHTML = `<button class="btn btn-success" onclick="marcarHabito()">${act.timestamp_marcado ? 'Re-marcar' : 'Marcar como hecho ✓'}</button>`;
+}
+
+function renderModalAuditoria(act, cat, evs) {
+  const min = act.cantidad_objetivo;
+  const evidencias = evs || [];
+  
+  // Lista de agentes presentes para dropdown
+  const agentesPresentes = agentesActivos.filter(a => agentesPresentesIds.includes(a.id));
+  
+  // Conteo por agente
+  const conteoPorAgente = {};
+  evidencias.forEach(e => {
+    if (e.agente_id) conteoPorAgente[e.agente_id] = (conteoPorAgente[e.agente_id] || 0) + 1;
+  });
+  
+  let evList = evidencias.map(e => `
+    <div class="evidence-item">
+      <div class="evidence-content">
+        <p><strong>${e.agentes?.nombre || e.nombre_agente || 'Agente'}</strong></p>
+        <small>${e.descripcion || 'Sin comentario'} ${e.score_otorgado ? `· Score: ${e.score_otorgado}` : ''}</small>
+      </div>
+      <button class="evidence-delete" onclick="borrarEvidencia('${e.id}')">Eliminar</button>
+    </div>
+  `).join('');
+  
+  // Resumen por agente (ver quién falta)
+  const cuotaPorAgente = cat.cuota_valor;
+  let resumenAgentes = '';
+  agentesPresentes.forEach(ag => {
+    const hechas = conteoPorAgente[ag.id] || 0;
+    const completo = hechas >= cuotaPorAgente;
+    resumenAgentes += `<span style="display:inline-block; padding:3px 8px; margin:2px; border-radius:6px; font-size:11px; background:${completo ? 'rgba(16,185,129,0.2)' : 'rgba(245,158,11,0.2)'}; color:${completo ? '#6ee7b7' : '#fbbf24'};">${ag.nombre}: ${hechas}/${cuotaPorAgente}</span>`;
+  });
+  
+  document.getElementById('modal-body').innerHTML = `
+    <p style="margin-bottom:12px; color:rgba(255,255,255,0.8);">Cuota mínima del día: <strong>${min}</strong> · Capturadas: <strong>${evidencias.length}</strong></p>
+    <div style="margin-bottom:16px; padding:10px; background:rgba(255,255,255,0.04); border-radius:8px; line-height:1.8;">${resumenAgentes || '<small>Sin agentes presentes</small>'}</div>
+    <div style="background:rgba(0,168,225,0.08); border:1px solid rgba(0,168,225,0.3); border-radius:10px; padding:14px; margin-bottom:16px;">
+      <p style="font-size:13px; font-weight:600; margin-bottom:10px;">Capturar nueva evidencia</p>
+      <div class="form-group">
+        <label>Agente</label>
+        <select id="ev-agente-select">
+          <option value="">-- Selecciona agente presente --</option>
+          ${agentesPresentes.map(a => `<option value="${a.id}">${a.nombre}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group"><label>Hallazgos / observaciones</label><textarea id="ev-desc" rows="2" placeholder="Qué encontraste, qué corregiste..."></textarea></div>
+      <div style="display:flex; gap:10px;">
+        <div class="form-group" style="flex:1;"><label>Score (1-10)</label><input type="number" id="ev-score" min="1" max="10" step="0.5"></div>
+        <div class="form-group" style="flex:1;"><label>Folio (opcional)</label><input type="text" id="ev-folio"></div>
+      </div>
+      <button class="btn" onclick="agregarEvidenciaConAgente()">Agregar</button>
+    </div>
+    <div class="evidence-list">${evList || '<p style="color:rgba(255,255,255,0.5); font-size:13px; text-align:center; padding:20px;">Aún no hay evidencias capturadas.</p>'}</div>
+  `;
+  document.getElementById('modal-actions').innerHTML = `<button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>`;
+}
+
+// ============================================================================
+// RECURSO POST-VENTA: modal especializado
+// ============================================================================
+
+// Calcular fecha del día anterior operativo (lunes → sábado)
+function getFechaVentas() {
+  const hoy = new Date();
+  // En modo demo simulamos que es lunes
+  const dow = DEMO_MODE ? 1 : hoy.getDay(); // 0=dom, 1=lun, ...
+  const ayer = new Date(hoy);
+  
+  if (dow === 1) {
+    // Lunes → sábado
+    // Si hoy es lunes real, restamos 2 días
+    // Si hoy es domingo (modo demo simulando lunes), restamos 1 día para llegar al sábado
+    if (DEMO_MODE && hoy.getDay() === 0) {
+      ayer.setDate(hoy.getDate() - 1); // domingo - 1 = sábado
+    } else {
+      ayer.setDate(hoy.getDate() - 2); // lunes - 2 = sábado
+    }
+  } else {
+    ayer.setDate(hoy.getDate() - 1);
+  }
+  return ayer.toISOString().split('T')[0];
+}
+
+// Mapeo nombre supervisor bitácora → nombres en plantilla (vía mapeo_supervisores)
+let postventaMapeoCache = null;
+async function getMapeoSupervisor() {
+  if (postventaMapeoCache) return postventaMapeoCache;
+  const { data } = await sb.from('mapeo_supervisores').select('nombre_origen, supervisor_id');
+  postventaMapeoCache = data || [];
+  return postventaMapeoCache;
+}
+
+async function renderModalPostVenta(act, cat) {
+  const fechaVentas = getFechaVentas();
+  const fechaTxt = new Date(fechaVentas + 'T12:00:00').toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' });
+  
+  document.getElementById('modal-body').innerHTML = `<div style="text-align:center; padding:40px;"><div class="loader"></div><p style="margin-top:12px; color:rgba(255,255,255,0.6); font-size:13px;">Cargando ventas del ${fechaTxt}...</p></div>`;
+  document.getElementById('modal-actions').innerHTML = `<button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>`;
+  
+  try {
+    // Obtener nombres alternativos del supervisor (Carmen / Carmen Rivas)
+    const mapeo = await getMapeoSupervisor();
+    const nombresSupervisor = [currentSupervisor.nombre];
+    mapeo.forEach(m => {
+      if (m.supervisor_id === currentSupervisor.id && !nombresSupervisor.includes(m.nombre_origen)) {
+        nombresSupervisor.push(m.nombre_origen);
+      }
+    });
+    
+    // Cargar ventas activadas del día anterior del informe-semanal
+    const { data: ventas, error: errVentas } = await sbInforme.from('ventas_detalle')
+      .select('folio, telefono, ejecutivo, plan, fecha_activacion, hora_activacion, supervisor, supervisor_act, estatus')
+      .eq('estatus', 'activada')
+      .eq('fecha_activacion', fechaVentas)
+      .in('supervisor_act', nombresSupervisor);
+    
+    if (errVentas) throw errVentas;
+    
+    // Cruzar con entregas_detalle para obtener nombre del cliente (por folio primero)
+    const folios = (ventas || []).map(v => v.folio).filter(Boolean);
+    let clientesPorFolio = {};
+    let clientesPorTel = {};
+    
+    if (folios.length > 0) {
+      const { data: entregasFolio } = await sbInforme.from('entregas_detalle')
+        .select('folio, cliente, telefono')
+        .in('folio', folios);
+      
+      (entregasFolio || []).forEach(e => {
+        if (e.cliente) {
+          if (e.folio) clientesPorFolio[e.folio] = e.cliente;
+          if (e.telefono) clientesPorTel[e.telefono] = e.cliente;
+        }
+      });
+      
+      // Si quedaron ventas sin nombre, buscar por teléfono como respaldo
+      const ventasSinNombre = (ventas || []).filter(v => !clientesPorFolio[v.folio] && v.telefono);
+      if (ventasSinNombre.length > 0) {
+        const tels = ventasSinNombre.map(v => v.telefono).filter(Boolean);
+        const { data: entregasTel } = await sbInforme.from('entregas_detalle')
+          .select('telefono, cliente')
+          .in('telefono', tels);
+        (entregasTel || []).forEach(e => {
+          if (e.cliente && e.telefono) clientesPorTel[e.telefono] = e.cliente;
+        });
+      }
+    }
+    
+    // Enriquecer ventas con nombre del cliente
+    (ventas || []).forEach(v => {
+      v.cliente = clientesPorFolio[v.folio] || clientesPorTel[v.telefono] || null;
+    });
+    
+    // Cargar registros ya capturados de post-venta
+    const { data: capturados } = await sb.from('recurso_postventa').select('*').eq('bitacora_actividad_id', act.id);
+    const capturadosMap = {};
+    (capturados || []).forEach(c => { capturadosMap[c.folio] = c; });
+    
+    if (!ventas || ventas.length === 0) {
+      document.getElementById('modal-body').innerHTML = `
+        <div style="text-align:center; padding:40px;">
+          <h3 style="font-size:16px; margin-bottom:8px;">Sin ventas del ${fechaTxt}</h3>
+          <p style="font-size:13px; color:rgba(255,255,255,0.6);">Tu equipo no activó ventas el día anterior, o aún no se ha sincronizado.</p>
+          <button class="btn btn-success" style="margin-top:20px;" onclick="marcarPostventaSinVentas('${act.id}')">Marcar como N/A (sin ventas) ✓</button>
+        </div>`;
+      return;
+    }
+    
+    // Calcular cantidad objetivo automáticamente
+    if (act.cantidad_objetivo !== ventas.length) {
+      await sb.from('bitacora_actividad').update({ cantidad_objetivo: ventas.length }).eq('id', act.id);
+    }
+    
+    // Stats
+    const total = ventas.length;
+    const contactados = ventas.filter(v => capturadosMap[v.folio]?.estatus_contacto === 'CONTACTADO').length;
+    const noContactados = ventas.filter(v => capturadosMap[v.folio]?.estatus_contacto === 'NO_CONTACTADO').length;
+    const ventasAd = ventas.filter(v => capturadosMap[v.folio]?.tipificacion === 'VENTA_ADICIONAL').length;
+    const seguimientos = ventas.filter(v => capturadosMap[v.folio]?.tipificacion === 'SEGUIMIENTO').length;
+    const noInteresa = ventas.filter(v => capturadosMap[v.folio]?.tipificacion === 'NO_INTERESA').length;
+    const pendientes = total - contactados - noContactados;
+    
+    // Renderizar lista de ventas
+    let ventasHTML = ventas.map(v => {
+      const cap = capturadosMap[v.folio];
+      let statusBadge = '';
+      let cardClass = 'background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1);';
+      
+      if (cap) {
+        if (cap.estatus_contacto === 'CONTACTADO') {
+          if (cap.tipificacion === 'VENTA_ADICIONAL') {
+            statusBadge = '<span style="background:rgba(16,185,129,0.25); color:#6ee7b7; padding:3px 8px; border-radius:6px; font-size:11px; font-weight:600;">🎉 VENTA ADICIONAL</span>';
+            cardClass = 'background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.4);';
+          } else if (cap.tipificacion === 'SEGUIMIENTO') {
+            statusBadge = '<span style="background:rgba(0,168,225,0.25); color:#7dd3fc; padding:3px 8px; border-radius:6px; font-size:11px; font-weight:600;">🔄 SEGUIMIENTO</span>';
+            cardClass = 'background: rgba(0,168,225,0.08); border: 1px solid rgba(0,168,225,0.4);';
+          } else {
+            statusBadge = '<span style="background:rgba(245,158,11,0.25); color:#fbbf24; padding:3px 8px; border-radius:6px; font-size:11px; font-weight:600;">❌ NO INTERESA</span>';
+            cardClass = 'background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.4);';
+          }
+        } else {
+          statusBadge = `<span style="background:rgba(239,68,68,0.25); color:#fca5a5; padding:3px 8px; border-radius:6px; font-size:11px; font-weight:600;">📵 ${cap.motivo_no_contacto || 'NO CONTACTADO'}</span>`;
+          cardClass = 'background: rgba(239,68,68,0.06); border: 1px solid rgba(239,68,68,0.3);';
+        }
+      } else {
+        statusBadge = '<span style="background:rgba(255,255,255,0.1); color:rgba(255,255,255,0.6); padding:3px 8px; border-radius:6px; font-size:11px; font-weight:600;">⏳ PENDIENTE</span>';
+      }
+      
+      return `
+        <div style="${cardClass} border-radius: 10px; padding: 12px 14px; margin-bottom: 8px;">
+          <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:6px;">
+            <div style="flex:1;">
+              <div style="font-weight:600; font-size:14px; margin-bottom:2px;">${v.cliente ? '👤 ' + v.cliente : '📞 ' + (v.telefono || 'Sin tel')}</div>
+              <div style="font-size:12px; color:rgba(255,255,255,0.7); margin-bottom:2px;">${v.cliente ? '📞 ' + (v.telefono || '—') + ' · ' : ''}${v.plan || 'Sin plan'}</div>
+              <div style="font-size:11px; color:rgba(255,255,255,0.5);">Folio: ${v.folio} · Agente: ${v.ejecutivo || '—'} · ${v.hora_activacion || ''}</div>
+            </div>
+            ${statusBadge}
+          </div>
+          ${cap && cap.estatus_contacto === 'CONTACTADO' ? `
+            <div style="font-size:12px; color:rgba(255,255,255,0.7); padding-top:6px; margin-top:6px; border-top:1px solid rgba(255,255,255,0.05);">
+              Canal: ${cap.canal_contacto || '—'} · ${cap.hora_contacto ? new Date(cap.hora_contacto).toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}) : ''}
+              ${cap.folio_venta_adicional ? ' · 🎯 Folio nuevo: <strong>' + cap.folio_venta_adicional + '</strong>' + (cap.validacion_folio === 'VALIDO' ? ' ✅' : cap.validacion_folio === 'PENDIENTE' ? ' ⏳' : ' ⚠️') : ''}
+              ${cap.tiene_referidos ? ' · 👥 Referidos' : ''}
+            </div>
+          ` : ''}
+          <button class="btn btn-secondary" style="width:100%; margin-top:8px; font-size:12px; padding:8px;" onclick="abrirCapturaPostventa('${act.id}', '${v.folio}', ${JSON.stringify(v).replace(/"/g, '&quot;')})">${cap ? '✏️ Editar' : '📝 Capturar contacto'}</button>
+        </div>`;
+    }).join('');
+    
+    document.getElementById('modal-body').innerHTML = `
+      <div style="background:rgba(0,168,225,0.08); border:1px solid rgba(0,168,225,0.3); border-radius:10px; padding:14px; margin-bottom:16px;">
+        <p style="font-size:12px; color:rgba(255,255,255,0.7); margin-bottom:8px; text-transform:uppercase; letter-spacing:1px;">Ventas activadas el ${fechaTxt}</p>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(90px, 1fr)); gap:6px;">
+          <div style="background:rgba(255,255,255,0.05); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700;">${total}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">TOTAL</div></div>
+          <div style="background:rgba(255,255,255,0.05); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#fbbf24;">${pendientes}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">PENDIENTES</div></div>
+          <div style="background:rgba(16,185,129,0.1); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#6ee7b7;">${ventasAd}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">V. ADIC.</div></div>
+          <div style="background:rgba(0,168,225,0.1); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#7dd3fc;">${seguimientos}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">SEGUIM.</div></div>
+          <div style="background:rgba(168,85,247,0.1); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#c4b5fd;">${contactados > 0 ? Math.round((ventasAd/contactados)*100) : 0}%</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">CONVERSIÓN</div></div>
+        </div>
+      </div>
+      <div style="max-height:500px; overflow-y:auto;">${ventasHTML}</div>
+    `;
+  } catch (err) {
+    console.error(err);
+    document.getElementById('modal-body').innerHTML = `<div class="error-msg show">Error: ${err.message}</div>`;
+  }
+}
+
+async function marcarPostventaSinVentas(actId) {
+  if (!confirm('¿Confirmar que tu equipo no tuvo ventas el día anterior?')) return;
+  await sb.from('bitacora_actividad').update({
+    estado: 'COMPLETADA', cantidad_realizada: 0, cantidad_objetivo: 0,
+    porcentaje_completado: 100, comentarios: 'Sin ventas el día anterior'
+  }).eq('id', actId);
+  closeModal();
+  await loadActivities();
+}
+
+// Sub-modal de captura
+let capturaPostventaContext = null;
+function abrirCapturaPostventa(actId, folio, ventaData) {
+  capturaPostventaContext = { actId, folio, ventaData };
+  
+  // Cargar registro existente si lo hay
+  sb.from('recurso_postventa').select('*').eq('bitacora_actividad_id', actId).eq('folio', folio).maybeSingle().then(({data: existing}) => {
+    const cap = existing || {};
+    
+    document.getElementById('modal-body').innerHTML = `
+      <div style="background:rgba(0,168,225,0.08); border:1px solid rgba(0,168,225,0.3); border-radius:10px; padding:12px; margin-bottom:16px;">
+        <div style="font-weight:600; font-size:14px;">📞 ${ventaData.telefono} · ${ventaData.plan}</div>
+        <div style="font-size:12px; color:rgba(255,255,255,0.6);">Folio: ${folio} · Agente: ${ventaData.ejecutivo} · ${ventaData.hora_activacion || ''}</div>
+      </div>
+      
+      <div class="form-group">
+        <label>Nombre del cliente ${ventaData.cliente ? '<span style="font-size:11px; color:#10b981;">(auto-detectado)</span>' : '<span style="font-size:11px; color:#fbbf24;">(no encontrado, opcional)</span>'}</label>
+        <input type="text" id="pv-cliente" placeholder="Nombre del cliente" value="${cap.cliente_nombre || ventaData.cliente || ''}">
+      </div>
+      
+      <div class="form-group">
+        <label>Canal de contacto</label>
+        <select id="pv-canal">
+          <option value="">-- Selecciona --</option>
+          <option value="LINEA_AGENTE" ${cap.canal_contacto === 'LINEA_AGENTE' ? 'selected' : ''}>Línea directa del agente</option>
+          <option value="BONSAIF" ${cap.canal_contacto === 'BONSAIF' ? 'selected' : ''}>Bonsaif</option>
+          <option value="WHATSAPP" ${cap.canal_contacto === 'WHATSAPP' ? 'selected' : ''}>WhatsApp</option>
+        </select>
+      </div>
+      
+      <div class="form-group">
+        <label>Estatus del contacto</label>
+        <select id="pv-estatus" onchange="togglePostventaCampos()">
+          <option value="">-- Selecciona --</option>
+          <option value="CONTACTADO" ${cap.estatus_contacto === 'CONTACTADO' ? 'selected' : ''}>✅ Contactado</option>
+          <option value="NO_CONTACTADO" ${cap.estatus_contacto === 'NO_CONTACTADO' ? 'selected' : ''}>❌ No contactado</option>
+        </select>
+      </div>
+      
+      <div id="pv-no-contacto" style="display:none;">
+        <div class="form-group">
+          <label>Motivo de no contacto</label>
+          <select id="pv-motivo-nc">
+            <option value="">-- Selecciona --</option>
+            <option value="NO_CONTESTA" ${cap.motivo_no_contacto === 'NO_CONTESTA' ? 'selected' : ''}>No contesta</option>
+            <option value="EQUIVOCADO" ${cap.motivo_no_contacto === 'EQUIVOCADO' ? 'selected' : ''}>Número equivocado</option>
+            <option value="FUERA_SERVICIO" ${cap.motivo_no_contacto === 'FUERA_SERVICIO' ? 'selected' : ''}>Fuera de servicio</option>
+            <option value="BUZON" ${cap.motivo_no_contacto === 'BUZON' ? 'selected' : ''}>Mandó a buzón</option>
+            <option value="OTRO" ${cap.motivo_no_contacto === 'OTRO' ? 'selected' : ''}>Otro</option>
+          </select>
+        </div>
+      </div>
+      
+      <div id="pv-contactado" style="display:none;">
+        <div class="form-group">
+          <label>Tipificación</label>
+          <select id="pv-tipificacion" onchange="togglePostventaCampos()">
+            <option value="">-- Selecciona --</option>
+            <option value="VENTA_ADICIONAL" ${cap.tipificacion === 'VENTA_ADICIONAL' ? 'selected' : ''}>🎉 Venta adicional cerrada</option>
+            <option value="SEGUIMIENTO" ${cap.tipificacion === 'SEGUIMIENTO' ? 'selected' : ''}>🔄 Seguimiento</option>
+            <option value="NO_INTERESA" ${cap.tipificacion === 'NO_INTERESA' ? 'selected' : ''}>❌ No le interesa</option>
+          </select>
+        </div>
+        
+        <div id="pv-venta-adicional" style="display:none;">
+          <div style="background:rgba(16,185,129,0.06); border:1px solid rgba(16,185,129,0.3); border-radius:10px; padding:12px; margin-bottom:12px;">
+            <p style="font-size:13px; font-weight:600; margin-bottom:8px; color:#6ee7b7;">🎉 Venta adicional - Folio para validación</p>
+            <div class="form-group" style="margin-bottom:0;">
+              <label>Folio de la nueva venta</label>
+              <input type="text" id="pv-folio-adicional" placeholder="Ej: ABC123456" value="${cap.folio_venta_adicional || ''}" style="text-transform:uppercase;">
+              <p style="font-size:11px; color:rgba(255,255,255,0.5); margin-top:4px;">📋 Se validará automáticamente cuando se actualice el informe-semanal con el Excel del día.</p>
+              ${cap.validacion_folio === 'VALIDO' ? '<p style="font-size:12px; color:#6ee7b7; margin-top:6px;">✅ Folio validado correctamente</p>' : ''}
+              ${cap.validacion_folio === 'PENDIENTE' ? '<p style="font-size:12px; color:#7dd3fc; margin-top:6px;">⏳ Pendiente de validación (informe-semanal aún no actualizado)</p>' : ''}
+              ${cap.validacion_folio === 'NO_ENCONTRADO' ? '<p style="font-size:12px; color:#fca5a5; margin-top:6px;">⚠️ Folio no encontrado tras 3+ días. Revisión necesaria.</p>' : ''}
+              ${cap.validacion_folio === 'AGENTE_DISTINTO' ? '<p style="font-size:12px; color:#fbbf24; margin-top:6px;">⚠️ Folio de otro supervisor</p>' : ''}
+            </div>
+          </div>
+        </div>
+        
+        <div id="pv-seguimiento" style="display:none;">
+          <div class="form-group">
+            <label>Nota de avance</label>
+            <textarea id="pv-nota-avance" rows="2" placeholder="Qué se acordó, dónde quedó la conversación...">${cap.nota_avance || ''}</textarea>
+          </div>
+          <div class="form-group">
+            <label>Motivo del seguimiento</label>
+            <textarea id="pv-motivo-seg" rows="2" placeholder="Por qué no cerró ahora, qué se necesita...">${cap.motivo_seguimiento || ''}</textarea>
+          </div>
+        </div>
+        
+        <div style="background:rgba(16,185,129,0.06); border:1px solid rgba(16,185,129,0.2); border-radius:10px; padding:12px; margin-top:12px;">
+          <p style="font-size:13px; font-weight:600; margin-bottom:8px;">👥 Referidos</p>
+          <div class="form-group">
+            <select id="pv-tiene-ref" onchange="toggleRefField()">
+              <option value="false" ${!cap.tiene_referidos ? 'selected' : ''}>Sin referidos</option>
+              <option value="true" ${cap.tiene_referidos ? 'selected' : ''}>Con referidos</option>
+            </select>
+            <textarea id="pv-referidos" rows="2" placeholder="Nombre y teléfono de referidos" style="margin-top:8px; display:none;">${cap.referidos_texto || ''}</textarea>
+          </div>
+        </div>
+      </div>
+    `;
+    
+    document.getElementById('modal-actions').innerHTML = `
+      <button class="btn btn-secondary" onclick="renderModalPostVenta(currentEditActividad.act, currentEditActividad.cat)">← Volver</button>
+      <button class="btn btn-success" onclick="guardarCapturaPostventa()">💾 Guardar contacto</button>
+    `;
+    
+    togglePostventaCampos();
+    toggleRefField();
+  });
+}
+
+function togglePostventaCampos() {
+  const estatus = document.getElementById('pv-estatus')?.value;
+  document.getElementById('pv-contactado').style.display = estatus === 'CONTACTADO' ? 'block' : 'none';
+  document.getElementById('pv-no-contacto').style.display = estatus === 'NO_CONTACTADO' ? 'block' : 'none';
+  
+  const tip = document.getElementById('pv-tipificacion')?.value;
+  const segDiv = document.getElementById('pv-seguimiento');
+  const ventAdicDiv = document.getElementById('pv-venta-adicional');
+  if (segDiv) segDiv.style.display = tip === 'SEGUIMIENTO' ? 'block' : 'none';
+  if (ventAdicDiv) ventAdicDiv.style.display = tip === 'VENTA_ADICIONAL' ? 'block' : 'none';
+}
+
+function toggleRefField() {
+  const tiene = document.getElementById('pv-tiene-ref')?.value === 'true';
+  const txt = document.getElementById('pv-referidos');
+  if (txt) txt.style.display = tiene ? 'block' : 'none';
+}
+
+async function guardarCapturaPostventa() {
+  const { actId, folio, ventaData } = capturaPostventaContext;
+  const estatus = document.getElementById('pv-estatus').value;
+  const canal = document.getElementById('pv-canal').value;
+  
+  if (!estatus) { alert('Selecciona el estatus del contacto'); return; }
+  if (!canal) { alert('Selecciona el canal'); return; }
+  
+  let tipificacion = null, motivoNC = null, notaAv = null, motivoSeg = null, tieneRef = false, refTexto = null;
+  let folioAdicional = null, validacionFolio = null;
+  
+  if (estatus === 'CONTACTADO') {
+    tipificacion = document.getElementById('pv-tipificacion').value;
+    if (!tipificacion) { alert('Selecciona la tipificación'); return; }
+    
+    if (tipificacion === 'VENTA_ADICIONAL') {
+      folioAdicional = document.getElementById('pv-folio-adicional').value.trim().toUpperCase();
+      if (!folioAdicional) { alert('Captura el folio de la venta adicional'); return; }
+      
+      // Marcar como PENDIENTE - se validará después cuando se actualice el informe-semanal
+      validacionFolio = 'PENDIENTE';
+    }
+    
+    if (tipificacion === 'SEGUIMIENTO') {
+      notaAv = document.getElementById('pv-nota-avance').value.trim();
+      motivoSeg = document.getElementById('pv-motivo-seg').value.trim();
+      if (!notaAv) { alert('Captura la nota de avance del seguimiento'); return; }
+      if (!motivoSeg) { alert('Captura el motivo del seguimiento'); return; }
+    }
+    tieneRef = document.getElementById('pv-tiene-ref').value === 'true';
+    refTexto = tieneRef ? document.getElementById('pv-referidos').value.trim() : null;
+    if (tieneRef && !refTexto) { alert('Captura los referidos o cambia a "sin referidos"'); return; }
+  } else {
+    motivoNC = document.getElementById('pv-motivo-nc').value;
+    if (!motivoNC) { alert('Selecciona el motivo del no contacto'); return; }
+  }
+  
+  const payload = {
+    bitacora_actividad_id: actId,
+    supervisor_id: currentSupervisor.id,
+    folio: folio,
+    telefono: ventaData.telefono,
+    cliente_nombre: document.getElementById('pv-cliente').value.trim() || ventaData.cliente || null,
+    agente_nombre: ventaData.ejecutivo,
+    plan: ventaData.plan,
+    fecha_activacion: ventaData.fecha_activacion,
+    hora_activacion: ventaData.hora_activacion,
+    hora_contacto: new Date().toISOString(),
+    canal_contacto: canal,
+    estatus_contacto: estatus,
+    motivo_no_contacto: motivoNC,
+    tipificacion: tipificacion,
+    nota_avance: notaAv,
+    motivo_seguimiento: motivoSeg,
+    tiene_referidos: tieneRef,
+    referidos_texto: refTexto,
+    folio_venta_adicional: folioAdicional,
+    validacion_folio: validacionFolio,
+    fecha_validacion: validacionFolio ? new Date().toISOString() : null
+  };
+  
+  // Upsert
+  const { error } = await sb.from('recurso_postventa').upsert(payload, { onConflict: 'bitacora_actividad_id,folio' });
+  if (error) { alert('Error: ' + error.message); return; }
+  
+  // Actualizar contador y estado en bitacora_actividad
+  const { count: totalCapturados } = await sb.from('recurso_postventa').select('*', { count: 'exact', head: true }).eq('bitacora_actividad_id', actId);
+  const { data: actUpdated } = await sb.from('bitacora_actividad').select('cantidad_objetivo').eq('id', actId).single();
+  const total = actUpdated?.cantidad_objetivo || 0;
+  
+  let nuevoEstado = 'PARCIAL';
+  if (totalCapturados >= total && total > 0) nuevoEstado = 'COMPLETADA';
+  
+  await sb.from('bitacora_actividad').update({
+    cantidad_realizada: totalCapturados,
+    estado: nuevoEstado,
+    porcentaje_completado: total > 0 ? (totalCapturados/total)*100 : 0
+  }).eq('id', actId);
+  
+  // Volver al listado
+  await renderModalPostVenta(currentEditActividad.act, currentEditActividad.cat);
+  await loadActivities();
+}
+
+function renderModalReporte(act, cat, evs) {
+  const evidencias = evs || [];
+  const agentesPresentes = agentesActivos.filter(a => agentesPresentesIds.includes(a.id));
+  
+  let evList = evidencias.map(e => `
+    <div class="evidence-item">
+      <div class="evidence-content">
+        <p><strong>${e.agentes?.nombre || e.nombre_agente || 'Caso'}</strong></p>
+        <small>${e.descripcion || ''} ${e.accion_tomada ? '· Acción: ' + e.accion_tomada : ''}</small>
+      </div>
+      <button class="evidence-delete" onclick="borrarEvidencia('${e.id}')">Eliminar</button>
+    </div>
+  `).join('');
+  
+  document.getElementById('modal-body').innerHTML = `
+    <p style="margin-bottom:16px; color:rgba(255,255,255,0.8); font-size:13px;">Captura cada caso revisado del reporte con la acción tomada.</p>
+    <div style="background:rgba(0,168,225,0.08); border:1px solid rgba(0,168,225,0.3); border-radius:10px; padding:14px; margin-bottom:16px;">
+      <div class="form-group">
+        <label>Agente / caso</label>
+        <select id="ev-agente-select">
+          <option value="">-- Selecciona agente --</option>
+          ${agentesPresentes.map(a => `<option value="${a.id}">${a.nombre}</option>`).join('')}
+          <option value="OTRO">Otro caso (escribir)</option>
+        </select>
+        <input type="text" id="ev-agente-text" placeholder="Nombre/folio si seleccionaste 'Otro'" style="margin-top:8px; display:none;">
+      </div>
+      <div class="form-group"><label>Hallazgo</label><textarea id="ev-desc" rows="2" placeholder="Qué encontraste"></textarea></div>
+      <div class="form-group"><label>Acción tomada</label><textarea id="ev-accion" rows="2" placeholder="Qué hiciste o vas a hacer"></textarea></div>
+      <button class="btn" onclick="agregarEvidenciaReporte()">Agregar caso</button>
+    </div>
+    <div class="evidence-list">${evList || '<p style="color:rgba(255,255,255,0.5); font-size:13px; text-align:center; padding:20px;">Aún no hay casos.</p>'}</div>
+    <div style="margin-top:16px; padding:14px; background:rgba(255,255,255,0.04); border-radius:10px;">
+      <p style="font-size:12px; color:rgba(255,255,255,0.6); margin-bottom:8px;">Si ya revisaste el 100% del reporte:</p>
+      <button class="btn btn-success" onclick="marcarReporteCompleto()">Reporte 100% revisado ✓</button>
+    </div>
+  `;
+  document.getElementById('modal-actions').innerHTML = `<button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>`;
+  
+  // Toggle "Otro" 
+  setTimeout(() => {
+    const sel = document.getElementById('ev-agente-select');
+    if (sel) sel.addEventListener('change', () => {
+      document.getElementById('ev-agente-text').style.display = sel.value === 'OTRO' ? 'block' : 'none';
+    });
+  }, 100);
+}
+
+// ============================================================================
+// ACCIONES
+// ============================================================================
+async function marcarHabito() {
+  const { act, cat } = currentEditActividad;
+  const ahora = new Date();
+  const tiempo = ahora.getHours() * 60 + ahora.getMinutes();
+  let bandera = null, motivo = null;
+  
+  if (cat.codigo === 'HERRAMIENTAS_LISTAS' && tiempo > 9*60+45) {
+    bandera = 'AMARILLA'; motivo = `Marcado tarde a las ${ahora.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'})}`;
+  } else if (cat.codigo === 'REUNION_INICIO' && tiempo > 10*60+5) {
+    bandera = 'AMARILLA'; motivo = `Junta tardía: ${ahora.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'})}`;
+  }
+  
+  let comentarios = act.comentarios;
+  if (cat.codigo === 'REUNION_INICIO' || cat.codigo === 'REUNION_CIERRE') {
+    comentarios = document.getElementById('comentarios-input')?.value || '';
+    if (!comentarios.trim()) { alert('Captura los 3 puntos clave de la reunión.'); return; }
+  }
+  
+  const { error } = await sb.from('bitacora_actividad').update({
+    estado: 'COMPLETADA', timestamp_marcado: ahora.toISOString(),
+    cantidad_realizada: 1, bandera, motivo_bandera: motivo, comentarios
+  }).eq('id', act.id);
+  
+  if (error) { alert('Error: ' + error.message); return; }
+  closeModal();
+  await loadActivities();
+}
+
+async function agregarEvidenciaConAgente() {
+  const { act, cat } = currentEditActividad;
+  const agenteId = document.getElementById('ev-agente-select').value;
+  const desc = document.getElementById('ev-desc').value.trim();
+  if (!agenteId) { alert('Selecciona un agente'); return; }
+  if (!desc) { alert('Captura los hallazgos'); return; }
+  
+  const agente = agentesActivos.find(a => a.id === agenteId);
+  const score = document.getElementById('ev-score').value;
+  const folio = document.getElementById('ev-folio').value.trim();
+  
+  const payload = {
+    bitacora_actividad_id: act.id, agente_id: agenteId,
+    nombre_agente: agente?.nombre || '', descripcion: desc
+  };
+  if (score) payload.score_otorgado = parseFloat(score);
+  if (folio) payload.folio_referencia = folio;
+  
+  const { error } = await sb.from('evidencias').insert(payload);
+  if (error) { alert('Error: ' + error.message); return; }
+  await actualizarEstadoActividad(act, cat);
+  await abrirActividad(act.id);
+  await loadActivities();
+}
+
+async function agregarEvidenciaReporte() {
+  const { act, cat } = currentEditActividad;
+  const agenteId = document.getElementById('ev-agente-select').value;
+  const desc = document.getElementById('ev-desc').value.trim();
+  if (!agenteId) { alert('Selecciona un agente'); return; }
+  if (!desc) { alert('Captura los hallazgos'); return; }
+  
+  let nombreAg = '';
+  let agenteIdReal = null;
+  if (agenteId === 'OTRO') {
+    nombreAg = document.getElementById('ev-agente-text').value.trim();
+    if (!nombreAg) { alert('Escribe el nombre/folio'); return; }
+  } else {
+    agenteIdReal = agenteId;
+    const a = agentesActivos.find(x => x.id === agenteId);
+    nombreAg = a?.nombre || '';
+  }
+  
+  const payload = {
+    bitacora_actividad_id: act.id, agente_id: agenteIdReal,
+    nombre_agente: nombreAg, descripcion: desc,
+    accion_tomada: document.getElementById('ev-accion').value.trim() || null
+  };
+  
+  const { error } = await sb.from('evidencias').insert(payload);
+  if (error) { alert('Error: ' + error.message); return; }
+  await actualizarEstadoActividad(act, cat);
+  await abrirActividad(act.id);
+  await loadActivities();
+}
+
+async function actualizarEstadoActividad(act, cat) {
+  const { count } = await sb.from('evidencias').select('*', { count: 'exact', head: true }).eq('bitacora_actividad_id', act.id);
+  let nuevoEstado = count === 0 ? 'PENDIENTE' : 'PARCIAL';
+  if (cat.cuota_tipo === 'POR_AGENTE' && count >= act.cantidad_objetivo) nuevoEstado = 'COMPLETADA';
+  await sb.from('bitacora_actividad').update({
+    cantidad_realizada: count, estado: nuevoEstado,
+    porcentaje_completado: act.cantidad_objetivo > 0 ? (count/act.cantidad_objetivo)*100 : 0
+  }).eq('id', act.id);
+}
+
+async function borrarEvidencia(evId) {
+  if (!confirm('¿Eliminar esta evidencia?')) return;
+  await sb.from('evidencias').delete().eq('id', evId);
+  const { act, cat } = currentEditActividad;
+  await actualizarEstadoActividad(act, cat);
+  await abrirActividad(act.id);
+  await loadActivities();
+}
+
+async function marcarReporteCompleto() {
+  const { act } = currentEditActividad;
+  if (!confirm('¿Confirmas 100% del reporte revisado?')) return;
+  await sb.from('bitacora_actividad').update({
+    estado: 'COMPLETADA', cantidad_realizada: 100, cantidad_objetivo: 100, porcentaje_completado: 100
+  }).eq('id', act.id);
+  closeModal();
+  await loadActivities();
+}
+
+async function cerrarDia() {
+  if (!confirm('¿Cerrar el día? NO podrás editar nada.')) return;
+  await sb.rpc('cerrar_bitacora_dia', { p_bitacora_id: currentBitacora.id });
+  await loadActivities();
+  alert('Día cerrado. ¡Buen trabajo!');
+}
+
+function closeModal() {
+  document.getElementById('modal-overlay').classList.remove('show');
+  currentEditActividad = null;
+}
+
+// ============================================================================
+// HISTORIAL
+// ============================================================================
+async function loadHistorial() {
+  const { data } = await sb.from('bitacora_diaria').select('*').eq('supervisor_id', currentSupervisor.id).eq('estado', 'CERRADO').order('fecha', { ascending: false }).limit(30);
+  const dias = data || [];
+  const totalDias = dias.length;
+  const promedio = totalDias > 0 ? dias.reduce((s, d) => s + parseFloat(d.score_dia), 0) / totalDias : 0;
+  const cumplimientoProm = totalDias > 0 ? dias.reduce((s, d) => s + parseFloat(d.porcentaje_cumplimiento), 0) / totalDias : 0;
+  const banderasTotal = dias.reduce((s, d) => s + d.banderas_amarillas + d.banderas_rojas, 0);
+  
+  document.getElementById('history-grid').innerHTML = `
+    <div class="history-stat"><div class="label">Score promedio</div><div class="value">${promedio.toFixed(0)}%</div><div class="sub">${totalDias} días</div></div>
+    <div class="history-stat"><div class="label">Cumplimiento</div><div class="value">${cumplimientoProm.toFixed(0)}%</div><div class="sub">Actividades</div></div>
+    <div class="history-stat"><div class="label">Banderas</div><div class="value">${banderasTotal}</div><div class="sub">Amarillas + rojas</div></div>
+    <div class="history-stat"><div class="label">Días registrados</div><div class="value">${totalDias}</div><div class="sub">Cerrados</div></div>
+  `;
+  
+  const tableHtml = dias.length === 0 ? '<div class="empty-state">Aún no hay bitácoras cerradas.</div>' : `
+    <table>
+      <thead><tr><th>Fecha</th><th>Tipo</th><th>Cumplimiento</th><th>Score</th><th>Banderas</th></tr></thead>
+      <tbody>${dias.map(d => `
+        <tr>
+          <td>${new Date(d.fecha).toLocaleDateString('es-MX', {weekday:'short', day:'2-digit', month:'short'})}</td>
+          <td>${d.tipo_dia === 'SABADO' ? 'Sáb' : 'L-V'}</td>
+          <td><strong>${parseFloat(d.porcentaje_cumplimiento).toFixed(0)}%</strong> (${d.actividades_completadas}/${d.actividades_aplicables})</td>
+          <td>${parseFloat(d.score_dia).toFixed(0)}</td>
+          <td>${d.banderas_amarillas > 0 ? '🟡' + d.banderas_amarillas + ' ' : ''}${d.banderas_rojas > 0 ? '🚩' + d.banderas_rojas : ''}${d.banderas_amarillas == 0 && d.banderas_rojas == 0 ? '✅' : ''}</td>
+        </tr>`).join('')}</tbody>
+    </table>`;
+  document.getElementById('history-table').innerHTML = tableHtml;
+}
+
+function changeTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById(`tab-btn-${tab}`).classList.add('active');
+  document.getElementById('tab-hoy').style.display = tab === 'hoy' ? 'block' : 'none';
+  document.getElementById('tab-historial').style.display = tab === 'historial' ? 'block' : 'none';
+  if (tab === 'historial') loadHistorial();
+}
+
+// SESSION
+window.addEventListener('DOMContentLoaded', () => {
+  const saved = sessionStorage.getItem('supervisor');
+  if (saved) {
+    currentSupervisor = JSON.parse(saved);
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('app').classList.add('show');
+    initApp();
+  }
+  document.getElementById('password').addEventListener('keypress', (e) => { if (e.key === 'Enter') login(); });
+});
+</script>
+</body>
+</html>

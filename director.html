@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sincronizar Plantilla - ExpertCell</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: linear-gradient(135deg, #0d1421 0%, #1a2942 50%, #0d1421 100%);
+    min-height: 100vh;
+    color: #fff;
+    padding: 24px;
+  }
+  .container { max-width: 1100px; margin: 0 auto; }
+  
+  /* LOGIN */
+  .login-screen {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: -24px;
+    padding: 24px;
+  }
+  .login-box {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(0, 168, 225, 0.3);
+    border-radius: 20px;
+    padding: 40px;
+    width: 100%;
+    max-width: 420px;
+    backdrop-filter: blur(20px);
+  }
+  .login-logo { text-align: center; margin-bottom: 32px; }
+  .login-logo h1 { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+  .login-logo p { font-size: 13px; color: rgba(255,255,255,0.6); letter-spacing: 1px; text-transform: uppercase; }
+  .login-logo .accent { display: inline-block; width: 8px; height: 8px; background: #00a8e1; border-radius: 50%; margin-right: 8px; box-shadow: 0 0 12px #00a8e1; }
+  .form-group { margin-bottom: 16px; }
+  .form-group label { display: block; font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.7); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 1px; }
+  .form-group input { width: 100%; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 10px; padding: 12px 14px; color: #fff; font-size: 14px; outline: none; }
+  .form-group input:focus { border-color: #00a8e1; }
+  .btn { background: linear-gradient(135deg, #00a8e1, #0086b3); color: white; border: none; padding: 14px 24px; border-radius: 10px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+  .btn:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(0, 168, 225, 0.4); }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn.full { width: 100%; }
+  .btn-success { background: linear-gradient(135deg, #10b981, #059669); }
+  .btn-secondary { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); }
+  .error-msg { color: #fca5a5; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; display: none; }
+  .error-msg.show { display: block; }
+  
+  /* APP */
+  .app { display: none; }
+  .app.show { display: block; }
+  
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 32px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+  .header h1 { font-size: 22px; font-weight: 700; }
+  .header p { font-size: 13px; color: rgba(255,255,255,0.6); margin-top: 4px; }
+  
+  .panel {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 16px;
+    padding: 28px;
+    margin-bottom: 20px;
+  }
+  
+  .panel h2 {
+    font-size: 17px;
+    margin-bottom: 8px;
+  }
+  .panel .subtitle {
+    font-size: 13px;
+    color: rgba(255,255,255,0.7);
+    margin-bottom: 20px;
+    line-height: 1.5;
+  }
+  
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 14px;
+    margin-bottom: 24px;
+  }
+  .stat {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    padding: 18px;
+  }
+  .stat .label { font-size: 11px; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .stat .value { font-size: 28px; font-weight: 700; color: #00a8e1; }
+  .stat .sub { font-size: 12px; color: rgba(255,255,255,0.5); margin-top: 4px; }
+  
+  .sync-zone {
+    background: linear-gradient(135deg, rgba(0, 168, 225, 0.1), rgba(0, 168, 225, 0.04));
+    border: 1px solid rgba(0, 168, 225, 0.4);
+    border-radius: 14px;
+    padding: 24px;
+    text-align: center;
+  }
+  .sync-zone h3 { font-size: 18px; margin-bottom: 8px; }
+  .sync-zone p { font-size: 13px; color: rgba(255,255,255,0.7); margin-bottom: 18px; line-height: 1.5; }
+  
+  .log-area {
+    background: #000;
+    border-radius: 10px;
+    padding: 16px;
+    margin-top: 16px;
+    font-family: 'Monaco', 'Menlo', monospace;
+    font-size: 12px;
+    max-height: 300px;
+    overflow-y: auto;
+    text-align: left;
+  }
+  .log-line { padding: 3px 0; color: rgba(255,255,255,0.8); }
+  .log-line.success { color: #10b981; }
+  .log-line.warning { color: #fbbf24; }
+  .log-line.error { color: #f87171; }
+  .log-line.info { color: #00a8e1; }
+  
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 16px;
+  }
+  th, td {
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    font-size: 13px;
+  }
+  th {
+    background: rgba(255,255,255,0.04);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: rgba(255,255,255,0.6);
+  }
+  
+  .badge {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .badge-cc2 { background: rgba(0, 168, 225, 0.2); color: #7dd3fc; }
+  .badge-jv { background: rgba(168, 85, 247, 0.2); color: #c4b5fd; }
+  
+  .loader { display: inline-block; width: 18px; height: 18px; border: 2px solid rgba(255,255,255,0.2); border-top-color: #00a8e1; border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  
+  .logout-btn { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: rgba(255,255,255,0.7); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div class="login-screen" id="login-screen">
+  <div class="login-box">
+    <div class="login-logo">
+      <h1><span class="accent"></span>Director - Sync Plantilla</h1>
+      <p>ExpertCell · Acceso restringido</p>
+    </div>
+    <div class="error-msg" id="login-error"></div>
+    <div class="form-group">
+      <label>Email</label>
+      <input type="email" id="email" placeholder="jonathan@expertcell.mx">
+    </div>
+    <div class="form-group">
+      <label>Contraseña</label>
+      <input type="password" id="password">
+    </div>
+    <button class="btn full" id="login-btn" onclick="login()">Ingresar</button>
+  </div>
+</div>
+
+<!-- APP -->
+<div class="app" id="app">
+  <div class="container">
+    <div class="header">
+      <div>
+        <h1>Sincronización de Plantilla</h1>
+        <p id="user-info">--</p>
+      </div>
+      <button class="logout-btn" onclick="logout()">Salir</button>
+    </div>
+    
+    <div class="panel">
+      <h2>Estado actual</h2>
+      <p class="subtitle">Resumen de agentes activos en bitácora vs. agentes activos en informe-semanal.</p>
+      
+      <div class="stats-grid" id="stats-grid">
+        <div class="stat">
+          <div class="label">En bitácora</div>
+          <div class="value" id="stat-bitacora">—</div>
+          <div class="sub">agentes activos hoy</div>
+        </div>
+        <div class="stat">
+          <div class="label">En informe-semanal</div>
+          <div class="value" id="stat-informe">—</div>
+          <div class="sub">ESTATUS = ACTIVO</div>
+        </div>
+        <div class="stat">
+          <div class="label">CC2 Puebla</div>
+          <div class="value" id="stat-cc2">—</div>
+          <div class="sub">CCENTER 2</div>
+        </div>
+        <div class="stat">
+          <div class="label">JV CDMX</div>
+          <div class="value" id="stat-jv">—</div>
+          <div class="sub">CCENTER JV</div>
+        </div>
+      </div>
+    </div>
+    
+    <div class="panel">
+      <div class="sync-zone">
+        <h3>🔄 Sincronizar plantilla</h3>
+        <p>Lee los agentes activos del informe-semanal y los actualiza en bitácora.<br>
+           Los agentes nuevos se agregan, los dados de baja se marcan como inactivos.</p>
+        <button class="btn" id="sync-btn" onclick="sincronizar()">Iniciar sincronización</button>
+        <div class="log-area" id="log-area" style="display:none;"></div>
+      </div>
+    </div>
+    
+    <div class="panel">
+      <div class="sync-zone" style="background: linear-gradient(135deg, rgba(16,185,129,0.1), rgba(16,185,129,0.04)); border: 1px solid rgba(16,185,129,0.4);">
+        <h3>🎯 Validar folios de venta adicional</h3>
+        <p>Cruza los folios PENDIENTES de las ventas adicionales contra el informe-semanal.<br>
+           Ejecuta este botón <strong>después</strong> de cargar el Excel del día en el informe-semanal.</p>
+        <button class="btn btn-success" id="validar-folios-btn" onclick="validarFolios()">Validar folios pendientes</button>
+        <div class="log-area" id="log-area-folios" style="display:none;"></div>
+      </div>
+    </div>
+    
+    <div class="panel">
+      <h2>Vista previa por supervisor</h2>
+      <p class="subtitle">Distribución actual de agentes activos en bitácora.</p>
+      <div id="supervisor-table"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ============================================================================
+// CONFIG
+// ============================================================================
+const SB_BITACORA = 'https://xorzmzdviiogmjdmsvai.supabase.co';
+const KEY_BITACORA = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhvcnptemR2aWlvZ21qZG1zdmFpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4Mjg0MzgsImV4cCI6MjA5MzQwNDQzOH0.Ya-E12GkiTYcvIwQR2lpgfVyEhN_Vfwh0_OaLkybulY';
+
+const SB_INFORME = 'https://hfvbekuerjjigtdekllh.supabase.co';
+const KEY_INFORME = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhmdmJla3VlcmpqaWd0ZGVrbGxoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY4MDIwMDMsImV4cCI6MjA5MjM3ODAwM30.og9ZKhXmDQjA4V4q2V4ikeYFAjxs9IQc4M-43BuIjB4';
+
+const sbBitacora = supabase.createClient(SB_BITACORA, KEY_BITACORA);
+const sbInforme = supabase.createClient(SB_INFORME, KEY_INFORME);
+
+// Mapeo de centro a ubicación
+const MAPEO_CENTRO = {
+  'CCENTER 2': 'CC2',
+  'CCENTER JV': 'JV'
+};
+
+let currentUser = null;
+
+// ============================================================================
+// AUTH
+// ============================================================================
+async function login() {
+  const email = document.getElementById('email').value.trim().toLowerCase();
+  const password = document.getElementById('password').value;
+  const errorEl = document.getElementById('login-error');
+  const btn = document.getElementById('login-btn');
+  
+  errorEl.classList.remove('show');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="loader"></span>';
+  
+  try {
+    // Buscar como Director o Coordinador
+    let user = null;
+    let role = null;
+    
+    const { data: dir } = await sbBitacora.from('directores').select('*').eq('email', email).eq('activo', true).maybeSingle();
+    if (dir && dir.password_hash === password) { user = dir; role = 'DIRECTOR'; }
+    
+    if (!user) {
+      const { data: coord } = await sbBitacora.from('coordinadores').select('*').eq('email', email).eq('activo', true).maybeSingle();
+      if (coord && coord.password_hash === password) { user = coord; role = 'COORDINADOR'; }
+    }
+    
+    if (!user) {
+      errorEl.textContent = 'Credenciales incorrectas o sin permisos';
+      errorEl.classList.add('show');
+      return;
+    }
+    
+    currentUser = { ...user, role };
+    sessionStorage.setItem('director_user', JSON.stringify(currentUser));
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('app').classList.add('show');
+    initApp();
+  } catch (err) {
+    console.error(err);
+    errorEl.textContent = 'Error de conexión';
+    errorEl.classList.add('show');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = 'Ingresar';
+  }
+}
+
+function logout() {
+  sessionStorage.clear();
+  location.reload();
+}
+
+// ============================================================================
+// INIT
+// ============================================================================
+async function initApp() {
+  document.getElementById('user-info').textContent = `${currentUser.nombre} · ${currentUser.role}`;
+  await cargarStats();
+  await cargarTablaSupervisores();
+}
+
+async function cargarStats() {
+  // Stats bitácora
+  const { count: countBit } = await sbBitacora.from('agentes')
+    .select('*', { count: 'exact', head: true })
+    .eq('activo', true);
+  document.getElementById('stat-bitacora').textContent = countBit || 0;
+  
+  // Stats informe-semanal
+  try {
+    const { data: infData } = await sbInforme.from('plantilla')
+      .select('centro')
+      .eq('estatus', 'ACTIVO');
+    
+    const total = infData?.length || 0;
+    const cc2 = infData?.filter(a => a.centro === 'CCENTER 2').length || 0;
+    const jv = infData?.filter(a => a.centro === 'CCENTER JV').length || 0;
+    
+    document.getElementById('stat-informe').textContent = total;
+    document.getElementById('stat-cc2').textContent = cc2;
+    document.getElementById('stat-jv').textContent = jv;
+  } catch (err) {
+    console.error('Error informe:', err);
+  }
+}
+
+async function cargarTablaSupervisores() {
+  const { data: sups } = await sbBitacora.from('supervisores')
+    .select('*, agentes(count)')
+    .eq('activo', true)
+    .order('ubicacion').order('nombre');
+  
+  if (!sups || sups.length === 0) {
+    document.getElementById('supervisor-table').innerHTML = '<p style="color:rgba(255,255,255,0.5); padding:20px; text-align:center;">No hay supervisores cargados.</p>';
+    return;
+  }
+  
+  // Para cada supervisor, contar agentes activos
+  const filas = [];
+  for (const sup of sups) {
+    const { count } = await sbBitacora.from('agentes')
+      .select('*', { count: 'exact', head: true })
+      .eq('supervisor_id', sup.id)
+      .eq('activo', true);
+    filas.push({ ...sup, agentes_count: count || 0 });
+  }
+  
+  let html = `
+    <table>
+      <thead>
+        <tr><th>Supervisor</th><th>Ubicación</th><th>Agentes activos</th></tr>
+      </thead>
+      <tbody>
+        ${filas.map(s => `
+          <tr>
+            <td>${s.nombre}</td>
+            <td><span class="badge badge-${s.ubicacion.toLowerCase()}">${s.ubicacion}</span></td>
+            <td><strong>${s.agentes_count}</strong></td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>`;
+  document.getElementById('supervisor-table').innerHTML = html;
+}
+
+// ============================================================================
+// SINCRONIZACIÓN
+// ============================================================================
+let logArea = null;
+
+function log(msg, tipo = '') {
+  if (!logArea) {
+    logArea = document.getElementById('log-area');
+    logArea.style.display = 'block';
+    logArea.innerHTML = '';
+  }
+  const line = document.createElement('div');
+  line.className = 'log-line ' + tipo;
+  line.textContent = msg;
+  logArea.appendChild(line);
+  logArea.scrollTop = logArea.scrollHeight;
+}
+
+async function sincronizar() {
+  if (!confirm('¿Iniciar sincronización? Esto leerá todos los agentes activos del informe-semanal y actualizará bitácora.')) return;
+  
+  const btn = document.getElementById('sync-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="loader"></span> Sincronizando...';
+  logArea = null;
+  
+  try {
+    log('▶ Iniciando sincronización...', 'info');
+    log('───────────────────────────────────────', '');
+    
+    // 1. Cargar supervisores + mapeo de bitácora
+    log('1. Cargando supervisores y mapeos de bitácora...', 'info');
+    const { data: sups, error: e1 } = await sbBitacora.from('supervisores')
+      .select('*').eq('activo', true);
+    if (e1) throw e1;
+    log(`   ${sups.length} supervisores activos`, 'success');
+    
+    const { data: mapeos } = await sbBitacora.from('mapeo_supervisores')
+      .select('nombre_origen, supervisor_id');
+    log(`   ${mapeos?.length || 0} mapeos de nombres cargados`, 'success');
+    
+    // Construir diccionario: cualquier nombre conocido → supervisor
+    const supMap = {};
+    sups.forEach(s => { supMap[s.nombre.toLowerCase().trim()] = s; });
+    (mapeos || []).forEach(m => {
+      const sup = sups.find(s => s.id === m.supervisor_id);
+      if (sup) supMap[m.nombre_origen.toLowerCase().trim()] = sup;
+    });
+    
+    // 2. Leer plantilla del informe-semanal
+    log('2. Leyendo plantilla del informe-semanal...', 'info');
+    const { data: plantilla, error: e2 } = await sbInforme.from('plantilla')
+      .select('id, nombre, supervisor, fecha_ingreso, estatus, centro')
+      .eq('estatus', 'ACTIVO');
+    if (e2) throw e2;
+    log(`   ${plantilla.length} agentes ACTIVOS en plantilla`, 'success');
+    
+    // 3. Cargar agentes existentes en bitácora
+    log('3. Cargando agentes existentes en bitácora...', 'info');
+    const { data: existentes } = await sbBitacora.from('agentes').select('*');
+    log(`   ${existentes?.length || 0} agentes registrados previamente`, 'success');
+    
+    const existMap = {};
+    (existentes || []).forEach(a => { if (a.id_origen) existMap[a.id_origen] = a; });
+    
+    // 4. Procesar cada agente
+    log('───────────────────────────────────────', '');
+    log('4. Procesando agentes...', 'info');
+    
+    let nuevos = 0, actualizados = 0, sinSupervisor = 0, sinUbicacion = 0;
+    const errores = [];
+    
+    for (const ag of plantilla) {
+      const nombreSup = (ag.supervisor || '').toLowerCase().trim();
+      let sup = supMap[nombreSup];
+      
+      // Si no hay match exacto, intentar variantes
+      if (!sup) {
+        // Quitar acentos y volver a buscar
+        const nombreNorm = nombreSup.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        sup = supMap[nombreNorm];
+        // Probar con primer nombre nada más
+        if (!sup) {
+          const primerNombre = nombreSup.split(' ')[0];
+          sup = supMap[primerNombre];
+        }
+      }
+      
+      if (!sup) {
+        sinSupervisor++;
+        log(`   ⚠ "${ag.nombre}" → supervisor "${ag.supervisor}" no existe en bitácora`, 'warning');
+        continue;
+      }
+      
+      const ubicacion = MAPEO_CENTRO[ag.centro];
+      if (!ubicacion) {
+        sinUbicacion++;
+        log(`   ⚠ "${ag.nombre}" → centro "${ag.centro}" no mapeado`, 'warning');
+        continue;
+      }
+      
+      const idOrigen = String(ag.id);
+      const payload = {
+        id_origen: idOrigen,
+        nombre: ag.nombre,
+        supervisor_id: sup.id,
+        ubicacion: ubicacion,
+        fecha_ingreso: ag.fecha_ingreso,
+        activo: true,
+        ultima_sync: new Date().toISOString()
+      };
+      
+      if (existMap[idOrigen]) {
+        // Actualizar
+        const { error } = await sbBitacora.from('agentes')
+          .update(payload).eq('id', existMap[idOrigen].id);
+        if (error) errores.push(`${ag.nombre}: ${error.message}`);
+        else actualizados++;
+        delete existMap[idOrigen]; // marcar como visto
+      } else {
+        // Insertar nuevo
+        const { error } = await sbBitacora.from('agentes').insert(payload);
+        if (error) errores.push(`${ag.nombre}: ${error.message}`);
+        else nuevos++;
+      }
+    }
+    
+    // 5. Marcar como inactivos los que ya no están en plantilla activa
+    log('───────────────────────────────────────', '');
+    log('5. Detectando bajas...', 'info');
+    let bajas = 0;
+    const restantes = Object.values(existMap).filter(a => a.activo);
+    for (const ag of restantes) {
+      await sbBitacora.from('agentes').update({ activo: false }).eq('id', ag.id);
+      bajas++;
+      log(`   ✗ Baja: ${ag.nombre}`, 'warning');
+    }
+    
+    // 6. Resumen
+    log('───────────────────────────────────────', '');
+    log('✅ Sincronización completada', 'success');
+    log(`   • ${nuevos} agentes nuevos`, 'success');
+    log(`   • ${actualizados} agentes actualizados`, 'success');
+    log(`   • ${bajas} agentes dados de baja`, bajas > 0 ? 'warning' : '');
+    if (sinSupervisor > 0) log(`   • ${sinSupervisor} sin supervisor mapeado`, 'warning');
+    if (sinUbicacion > 0) log(`   • ${sinUbicacion} sin ubicación mapeada`, 'warning');
+    if (errores.length > 0) {
+      log(`   • ${errores.length} errores:`, 'error');
+      errores.slice(0, 5).forEach(e => log(`     - ${e}`, 'error'));
+    }
+    
+    await cargarStats();
+    await cargarTablaSupervisores();
+    
+  } catch (err) {
+    log(`✗ Error fatal: ${err.message}`, 'error');
+    console.error(err);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = 'Sincronizar de nuevo';
+  }
+}
+
+// ============================================================================
+// VALIDACIÓN DE FOLIOS DE VENTA ADICIONAL
+// ============================================================================
+let logAreaFolios = null;
+
+function logFolio(msg, tipo = '') {
+  if (!logAreaFolios) {
+    logAreaFolios = document.getElementById('log-area-folios');
+    logAreaFolios.style.display = 'block';
+    logAreaFolios.innerHTML = '';
+  }
+  const line = document.createElement('div');
+  line.className = 'log-line ' + tipo;
+  line.textContent = msg;
+  logAreaFolios.appendChild(line);
+  logAreaFolios.scrollTop = logAreaFolios.scrollHeight;
+}
+
+async function validarFolios() {
+  if (!confirm('¿Iniciar validación? Esto cruzará todos los folios pendientes contra el informe-semanal actualizado.')) return;
+  
+  const btn = document.getElementById('validar-folios-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="loader"></span> Validando...';
+  logAreaFolios = null;
+  
+  try {
+    logFolio('▶ Iniciando validación de folios...', 'info');
+    logFolio('───────────────────────────────────────', '');
+    
+    // 1. Obtener todos los folios PENDIENTES
+    logFolio('1. Cargando folios pendientes...', 'info');
+    const { data: pendientes, error: e1 } = await sbBitacora.from('recurso_postventa')
+      .select('id, folio_venta_adicional, supervisor_id, created_at, cliente_nombre')
+      .eq('validacion_folio', 'PENDIENTE');
+    if (e1) throw e1;
+    logFolio(`   ${pendientes.length} folios pendientes de validación`, 'success');
+    
+    if (pendientes.length === 0) {
+      logFolio('✅ No hay folios para validar', 'success');
+      return;
+    }
+    
+    // 2. Cargar mapeo de supervisores
+    const { data: sups } = await sbBitacora.from('supervisores').select('id, nombre');
+    const { data: mapeo } = await sbBitacora.from('mapeo_supervisores').select('nombre_origen, supervisor_id');
+    const supNombresPorId = {};
+    sups.forEach(s => { supNombresPorId[s.id] = [s.nombre]; });
+    (mapeo || []).forEach(m => {
+      if (supNombresPorId[m.supervisor_id]) {
+        supNombresPorId[m.supervisor_id].push(m.nombre_origen);
+      }
+    });
+    
+    // 3. Validar cada folio
+    logFolio('───────────────────────────────────────', '');
+    logFolio('2. Cruzando folios contra ventas_detalle...', 'info');
+    
+    let validos = 0, noEncontrados = 0, otroSup = 0, foliosViejos = 0;
+    
+    for (const reg of pendientes) {
+      const folioBuscar = reg.folio_venta_adicional;
+      const { data: venta } = await sbInforme.from('ventas_detalle')
+        .select('folio, supervisor, supervisor_act, fecha_bo, fecha_activacion, estatus')
+        .eq('folio', folioBuscar)
+        .maybeSingle();
+      
+      let resultado = 'NO_ENCONTRADO';
+      
+      if (venta) {
+        const nombresSup = supNombresPorId[reg.supervisor_id] || [];
+        const esDelSup = nombresSup.includes(venta.supervisor_act) || nombresSup.includes(venta.supervisor);
+        
+        // Verificar fecha (debe ser cercana a la fecha del registro post-venta)
+        const fechaRegistro = new Date(reg.created_at);
+        const fechaBO = venta.fecha_bo ? new Date(venta.fecha_bo) : null;
+        const diasDiff = fechaBO ? Math.abs((fechaRegistro - fechaBO) / (1000 * 60 * 60 * 24)) : 0;
+        
+        if (!esDelSup) {
+          resultado = 'AGENTE_DISTINTO';
+          otroSup++;
+          logFolio(`   ⚠ ${folioBuscar} → otro supervisor (${venta.supervisor_act})`, 'warning');
+        } else if (diasDiff > 7) {
+          resultado = 'FOLIO_VIEJO';
+          foliosViejos++;
+          logFolio(`   ⚠ ${folioBuscar} → folio anterior (${diasDiff.toFixed(0)} días)`, 'warning');
+        } else {
+          resultado = 'VALIDO';
+          validos++;
+          logFolio(`   ✓ ${folioBuscar} → válido (${reg.cliente_nombre || 'sin nombre'})`, 'success');
+        }
+      } else {
+        // Si no se encontró pero solo tiene 1-2 días, dejarlo PENDIENTE
+        const dias = (Date.now() - new Date(reg.created_at).getTime()) / (1000 * 60 * 60 * 24);
+        if (dias < 3) {
+          logFolio(`   ⏳ ${folioBuscar} → aún pendiente (${dias.toFixed(1)} días)`, '');
+          continue; // No actualizar
+        }
+        noEncontrados++;
+        logFolio(`   ✗ ${folioBuscar} → no encontrado (${dias.toFixed(0)}+ días)`, 'error');
+      }
+      
+      // Actualizar
+      await sbBitacora.from('recurso_postventa').update({
+        validacion_folio: resultado,
+        fecha_validacion: new Date().toISOString()
+      }).eq('id', reg.id);
+    }
+    
+    // 4. Resumen
+    logFolio('───────────────────────────────────────', '');
+    logFolio('✅ Validación completada', 'success');
+    logFolio(`   • ${validos} folios validados ✓`, 'success');
+    if (noEncontrados > 0) logFolio(`   • ${noEncontrados} no encontrados (banderas rojas)`, 'error');
+    if (otroSup > 0) logFolio(`   • ${otroSup} de otros supervisores (revisión)`, 'warning');
+    if (foliosViejos > 0) logFolio(`   • ${foliosViejos} folios viejos (revisión)`, 'warning');
+    
+  } catch (err) {
+    logFolio(`✗ Error: ${err.message}`, 'error');
+    console.error(err);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = 'Validar folios pendientes';
+  }
+}
+
+// ============================================================================
+// SESSION
+// ============================================================================
+window.addEventListener('DOMContentLoaded', () => {
+  const saved = sessionStorage.getItem('director_user');
+  if (saved) {
+    currentUser = JSON.parse(saved);
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('app').classList.add('show');
+    initApp();
+  }
+  document.getElementById('password')?.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') login();
+  });
+});
+</script>
+</body>
+</html>
