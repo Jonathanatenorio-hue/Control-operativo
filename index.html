@@ -2902,26 +2902,59 @@ const TIPO_LABELS = {
   'SIN_PROGRAMAR': { titulo: 'sin programar', verbo: 'programar', verbo_pasado: 'programó', col_fecha: 'fecha_bo' }
 };
 
-// Calcular días sin actividad considerando que sábado = medio día
-// y domingo no cuenta
-function calcularDiasSinActividad(fechaUltima) {
+// Cache del calendario para no recargarlo cada vez
+let calendarioCache = null;
+
+async function cargarCalendarioDias() {
+  if (calendarioCache) return calendarioCache;
+  
+  // Cargar desde el INFORME-SEMANAL (donde realmente vive el calendario)
+  const { data, error } = await sbInforme.from('calendario_dias')
+    .select('fecha, factor_dia')
+    .order('fecha');
+  
+  if (error || !data) {
+    console.error('Error cargando calendario_dias:', error);
+    return {};
+  }
+  
+  // Convertir a objeto { 'YYYY-MM-DD': factor }
+  const cal = {};
+  data.forEach(d => { cal[d.fecha] = parseFloat(d.factor_dia); });
+  calendarioCache = cal;
+  return cal;
+}
+
+// Calcular días laborales sin actividad usando calendario real
+// IMPORTANTE: NO incluye el día de HOY (hoy aún tiene oportunidad)
+// Solo cuenta días entre (última actividad + 1) y AYER inclusive
+function calcularDiasLaboralesSinActividad(fechaUltima, calendario) {
   if (!fechaUltima) return 999; // nunca tuvo actividad
   
   const ahora = new Date();
-  const ultima = new Date(fechaUltima + 'T12:00:00');
+  const ayer = new Date(ahora);
+  ayer.setDate(ahora.getDate() - 1);
   
-  let dias = 0;
-  const cursor = new Date(ultima);
-  cursor.setDate(cursor.getDate() + 1); // empezar al día siguiente
+  // Iterar desde el día siguiente a la última actividad hasta ayer (inclusive)
+  let total = 0;
+  const cursor = new Date(fechaUltima + 'T12:00:00');
+  cursor.setDate(cursor.getDate() + 1);
   
-  while (cursor < ahora) {
-    const dow = cursor.getDay();
-    if (dow === 6) dias += 0.5;       // sábado = medio día
-    else if (dow === 0) dias += 0;    // domingo = no cuenta
-    else dias += 1;                    // lunes-viernes = día completo
+  while (cursor <= ayer) {
+    const fechaStr = getFechaLocal(cursor);
+    const factor = calendario[fechaStr];
+    if (factor !== undefined) {
+      total += factor;
+    } else {
+      // Si no hay registro en calendario, asumir factor por DOW
+      const dow = cursor.getDay();
+      if (dow === 0) total += 0;
+      else if (dow === 6) total += 0.5;
+      else total += 1;
+    }
     cursor.setDate(cursor.getDate() + 1);
   }
-  return dias;
+  return Math.round(total * 10) / 10;
 }
 
 async function renderModalSinActividad(act, cat, tipo) {
@@ -2931,6 +2964,9 @@ async function renderModalSinActividad(act, cat, tipo) {
   try {
     const labels = TIPO_LABELS[tipo];
     const UMBRAL_DIAS = 3.5;
+    
+    // Cargar calendario del informe-semanal
+    const calendario = await cargarCalendarioDias();
     
     // 1. Cargar agentes activos del supervisor
     const agentesPresentesIdsLocal = agentesActivos.filter(a => agentesPresentesIds.includes(a.id));
@@ -2966,13 +3002,13 @@ async function renderModalSinActividad(act, cat, tipo) {
       const { data: registros } = await query.order(fechaCol, { ascending: false }).limit(1);
       
       const ultimaFecha = registros && registros.length > 0 ? registros[0][fechaCol] : null;
-      const dias = calcularDiasSinActividad(ultimaFecha);
+      const dias = calcularDiasLaboralesSinActividad(ultimaFecha, calendario);
       
       if (dias >= UMBRAL_DIAS) {
         enFocoRojo.push({
           agente_id: agente.id,
           agente_nombre: agente.nombre,
-          dias_sin_actividad: Math.round(dias * 10) / 10,
+          dias_sin_actividad: dias,
           fecha_ultima: ultimaFecha
         });
       }
