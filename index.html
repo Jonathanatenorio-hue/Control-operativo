@@ -2986,19 +2986,18 @@ async function renderModalSinActividad(act, cat, tipo) {
     
     // 2. Para cada agente, obtener su última activación / programación del informe-semanal
     const fechaCol = labels.col_fecha;
-    const filtroEstatus = tipo === 'SIN_VENTA' ? 'activada' : null;
     
     const enFocoRojo = [];
     
     for (const agente of agentesActivos) {
       // Buscar la fecha de última actividad
+      // NOTA: Incluimos canceladas porque informe-semanal cuenta así
+      // (el agente sí trabajó esa venta, aunque después se cancele)
+      // Por eso NO filtramos por estatus = 'activada', solo por que tenga la fecha
       let query = sbInforme.from('ventas_detalle')
-        .select(`folio, ${fechaCol}, estatus, fecha_cancelacion`)
+        .select(`folio, ${fechaCol}, estatus`)
         .eq('ejecutivo', agente.nombre)
-        .not(fechaCol, 'is', null)
-        .is('fecha_cancelacion', null);  // EXCLUIR canceladas - cuentan solo las que siguen activas
-      
-      if (filtroEstatus) query = query.eq('estatus', filtroEstatus);
+        .not(fechaCol, 'is', null);
       
       const { data: registros } = await query.order(fechaCol, { ascending: false }).limit(1);
       
@@ -3288,18 +3287,17 @@ async function verificarCompromisoSinActividad(seguimientoId, agenteId, agenteNo
   const labels = TIPO_LABELS[tipo];
   
   // Verificar automáticamente en el informe-semanal si ya activó/programó después de la fecha del compromiso
+  // NOTA: misma lógica que la detección - cuenta canceladas también
   const fechaCompromiso = padre.created_at.split('T')[0];
   const fechaCol = labels.col_fecha;
-  const filtroEstatus = tipo === 'SIN_VENTA' ? 'activada' : null;
   
-  let query = sbInforme.from('ventas_detalle')
-    .select(`folio, ${fechaCol}, estatus, fecha_cancelacion`)
+  const { data: nuevas } = await sbInforme.from('ventas_detalle')
+    .select(`folio, ${fechaCol}, estatus`)
     .eq('ejecutivo', agenteNombre)
     .gt(fechaCol, fechaCompromiso)
-    .is('fecha_cancelacion', null);  // solo las que siguen activas
-  if (filtroEstatus) query = query.eq('estatus', filtroEstatus);
+    .order(fechaCol, { ascending: false })
+    .limit(1);
   
-  const { data: nuevas } = await query.order(fechaCol, { ascending: false }).limit(1);
   const yaActivo = nuevas && nuevas.length > 0;
   
   // Si SÍ activó/programó → marcar como cumplido directamente
