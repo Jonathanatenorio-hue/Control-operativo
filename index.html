@@ -1724,14 +1724,19 @@ async function renderModalWhatsapp(act, cat) {
     });
     
     // 1. Cargar casos seleccionados de tipificacion_diaria
-    const { data: casos, error: errCasos } = await sb.from('tipificacion_diaria')
+    // Match case-insensitive porque en CSV vienen MAYÚSCULAS y en bitácora capitalizado
+    const nombresUpper = nombresSupervisor.map(n => n.toUpperCase());
+    const { data: casosRaw, error: errCasos } = await sb.from('tipificacion_diaria')
       .select('*')
       .eq('fecha_cc', fechaAuditar)
-      .eq('fue_seleccionado', true)
-      .in('supervisor_nombre', nombresSupervisor)
-      .order('agente_nombre');
+      .eq('fue_seleccionado', true);
     
     if (errCasos) throw errCasos;
+    
+    // Filtrar en JS para hacer match case-insensitive
+    const casos = (casosRaw || []).filter(c => 
+      c.supervisor_nombre && nombresUpper.includes(c.supervisor_nombre.trim().toUpperCase())
+    ).sort((a, b) => (a.agente_nombre || '').localeCompare(b.agente_nombre || ''));
     
     // 2. Cargar auditorías ya capturadas hoy
     const { data: audsHoy } = await sb.from('auditoria_whatsapp')
