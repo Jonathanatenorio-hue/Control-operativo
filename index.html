@@ -628,6 +628,7 @@ async function abrirActividad(bitacoraActividadId) {
   if (cat.tipo === 'HABITO') renderModalHabito(act, cat);
   else if (cat.codigo === 'RECURSO_POSTVENTA') await renderModalPostVenta(act, cat);
   else if (cat.codigo === 'AUDITORIA_AUDIOS') await renderModalAudios(act, cat);
+  else if (cat.codigo === 'AUDITORIA_WHATSAPP') await renderModalWhatsapp(act, cat);
   else if (cat.cuota_tipo === 'POR_AGENTE') renderModalAuditoria(act, cat, evs);
   else renderModalReporte(act, cat, evs);
   
@@ -1698,6 +1699,608 @@ async function evaluarCompromiso(auditoriaId, cumplido, actIdHoy) {
   
   await renderModalAudios(currentEditActividad.act, currentEditActividad.cat);
   await loadActivities();
+}
+
+// ============================================================================
+// AUDITORÍA DE WHATSAPP: modal con flujo de preguntas
+// ============================================================================
+
+async function renderModalWhatsapp(act, cat) {
+  document.getElementById('modal-body').innerHTML = `<div style="text-align:center; padding:40px;"><div class="loader"></div><p style="margin-top:12px; color:rgba(255,255,255,0.6); font-size:13px;">Cargando casos asignados...</p></div>`;
+  document.getElementById('modal-actions').innerHTML = `<button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>`;
+  
+  try {
+    // Calcular fecha del día anterior laboral
+    const fechaAuditar = getFechaVentas(); // misma lógica que post-venta
+    const fechaTxt = new Date(fechaAuditar + 'T12:00:00').toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' });
+    
+    // Obtener nombres del supervisor (variantes)
+    const mapeo = await getMapeoSupervisor();
+    const nombresSupervisor = [currentSupervisor.nombre];
+    mapeo.forEach(m => {
+      if (m.supervisor_id === currentSupervisor.id && !nombresSupervisor.includes(m.nombre_origen)) {
+        nombresSupervisor.push(m.nombre_origen);
+      }
+    });
+    
+    // 1. Cargar casos seleccionados de tipificacion_diaria
+    const { data: casos, error: errCasos } = await sb.from('tipificacion_diaria')
+      .select('*')
+      .eq('fecha_cc', fechaAuditar)
+      .eq('fue_seleccionado', true)
+      .in('supervisor_nombre', nombresSupervisor)
+      .order('agente_nombre');
+    
+    if (errCasos) throw errCasos;
+    
+    // 2. Cargar auditorías ya capturadas hoy
+    const { data: audsHoy } = await sb.from('auditoria_whatsapp')
+      .select('*')
+      .eq('bitacora_actividad_id', act.id);
+    const audsMap = {};
+    (audsHoy || []).forEach(a => { audsMap[a.tipificacion_id] = a; });
+    
+    // 3. Cargar seguimientos pendientes (positivos en seguimiento)
+    const hoyLocal = getFechaLocal(new Date());
+    const { data: seguimientos } = await sb.from('auditoria_whatsapp')
+      .select('*')
+      .eq('supervisor_id', currentSupervisor.id)
+      .eq('caso_cerrado', false)
+      .eq('tipificacion_final', 'SEGUIMIENTO')
+      .lte('fecha_proximo_seguimiento', hoyLocal)
+      .order('fecha_proximo_seguimiento');
+    
+    if (!casos || casos.length === 0) {
+      document.getElementById('modal-body').innerHTML = `
+        <div style="text-align:center; padding:40px;">
+          <h3 style="font-size:16px; margin-bottom:8px;">Sin casos asignados</h3>
+          <p style="font-size:13px; color:rgba(255,255,255,0.6);">El coordinador aún no ha cargado el reporte de tipificación del ${fechaTxt}, o tu equipo no tiene casos válidos para auditar.</p>
+          <p style="font-size:12px; color:rgba(255,255,255,0.5); margin-top:12px;">Vuelve a entrar después de las 9:30 AM.</p>
+        </div>`;
+      return;
+    }
+    
+    // Calcular cantidad objetivo
+    const totalCasos = casos.length + (seguimientos?.length || 0);
+    if (act.cantidad_objetivo !== totalCasos) {
+      await sb.from('bitacora_actividad').update({ cantidad_objetivo: totalCasos }).eq('id', act.id);
+    }
+    
+    // Stats
+    const total = casos.length;
+    const capturados = casos.filter(c => audsMap[c.id]).length;
+    const pendientes = total - capturados;
+    const ventas = (audsHoy || []).filter(a => a.tipificacion_final === 'VENTA').length;
+    const enSeguimiento = (audsHoy || []).filter(a => a.tipificacion_final === 'SEGUIMIENTO').length;
+    const sinResp = (audsHoy || []).filter(a => a.respuesta_cliente === 'SIN_RESPUESTA').length;
+    
+    // Agrupar casos por agente
+    const porAgente = {};
+    casos.forEach(c => {
+      if (!porAgente[c.agente_nombre]) porAgente[c.agente_nombre] = [];
+      porAgente[c.agente_nombre].push(c);
+    });
+    
+    // Render bloque de SEGUIMIENTOS PENDIENTES
+    let seguimientosHTML = '';
+    if (seguimientos && seguimientos.length > 0) {
+      seguimientosHTML = `
+        <div style="background:rgba(0,168,225,0.05); border:1px solid rgba(0,168,225,0.3); border-radius:12px; padding:14px; margin-bottom:16px;">
+          <p style="font-size:13px; font-weight:700; margin-bottom:10px; color:#7dd3fc; text-transform:uppercase; letter-spacing:1px;">🔄 Seguimientos pendientes (${seguimientos.length})</p>
+          ${seguimientos.map(s => `
+            <div style="background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:10px; padding:10px 12px; margin-bottom:6px;">
+              <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px;">
+                <div style="flex:1;">
+                  <div style="font-weight:600; font-size:13px;">👤 ${s.cliente_nombre || s.dn_cliente}</div>
+                  <div style="font-size:11px; color:rgba(255,255,255,0.6);">Agente: ${s.agente_nombre} · Plan: ${s.plan_actual}</div>
+                  ${s.motivo_seguimiento ? `<div style="font-size:11px; color:rgba(255,255,255,0.6); margin-top:4px;">📝 ${s.motivo_seguimiento}</div>` : ''}
+                </div>
+                <button class="btn" style="font-size:11px; padding:6px 10px;" onclick="continuarSeguimientoWhatsapp('${s.id}', '${act.id}')">Trabajar</button>
+              </div>
+            </div>
+          `).join('')}
+        </div>`;
+    }
+    
+    // Render bloque de NUEVOS CASOS por agente
+    let casosHTML = '';
+    for (const agente in porAgente) {
+      const lista = porAgente[agente];
+      const capturadosDeEste = lista.filter(c => audsMap[c.id]).length;
+      
+      casosHTML += `
+        <div style="margin-bottom:20px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; padding-bottom:6px; border-bottom:1px solid rgba(255,255,255,0.08);">
+            <p style="font-size:13px; font-weight:700; color:rgba(255,255,255,0.9);">👤 ${agente}</p>
+            <span style="font-size:11px; color:rgba(255,255,255,0.6);">${capturadosDeEste}/${lista.length}</span>
+          </div>
+          ${lista.map(c => renderTarjetaCasoWhatsapp(c, audsMap[c.id], act.id)).join('')}
+        </div>`;
+    }
+    
+    document.getElementById('modal-body').innerHTML = `
+      <div style="background:rgba(0,168,225,0.08); border:1px solid rgba(0,168,225,0.3); border-radius:10px; padding:14px; margin-bottom:16px;">
+        <p style="font-size:12px; color:rgba(255,255,255,0.7); margin-bottom:8px; text-transform:uppercase; letter-spacing:1px;">Casos del ${fechaTxt}</p>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(80px, 1fr)); gap:6px;">
+          <div style="background:rgba(255,255,255,0.05); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700;">${total}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">CASOS</div></div>
+          <div style="background:rgba(255,255,255,0.05); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#fbbf24;">${pendientes}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">PEND.</div></div>
+          <div style="background:rgba(16,185,129,0.1); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#6ee7b7;">${ventas}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">VENTAS</div></div>
+          <div style="background:rgba(0,168,225,0.1); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#7dd3fc;">${enSeguimiento}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">SEGUIM.</div></div>
+          <div style="background:rgba(168,85,247,0.1); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#c4b5fd;">${sinResp}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">SIN RESP.</div></div>
+        </div>
+      </div>
+      
+      ${seguimientosHTML}
+      
+      <div style="max-height:600px; overflow-y:auto;">${casosHTML}</div>
+    `;
+  } catch (err) {
+    console.error(err);
+    document.getElementById('modal-body').innerHTML = `<div class="error-msg show">Error: ${err.message}</div>`;
+  }
+}
+
+function renderTarjetaCasoWhatsapp(caso, aud, actId) {
+  let badge = '<span style="background:rgba(255,255,255,0.1); color:rgba(255,255,255,0.6); padding:3px 8px; border-radius:6px; font-size:11px;">⏳ PENDIENTE</span>';
+  let cardClass = 'background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1);';
+  
+  if (aud) {
+    if (aud.mensaje_enviado === false) {
+      badge = `<span style="background:rgba(239,68,68,0.25); color:#fca5a5; padding:3px 8px; border-radius:6px; font-size:11px;">🚨 NO ENVIÓ MSG</span>`;
+      cardClass = 'background: rgba(239,68,68,0.06); border: 1px solid rgba(239,68,68,0.3);';
+    } else if (aud.mensaje_personalizado === false) {
+      badge = `<span style="background:rgba(245,158,11,0.25); color:#fbbf24; padding:3px 8px; border-radius:6px; font-size:11px;">⚠️ NO PERSONALIZADO</span>`;
+      cardClass = 'background: rgba(245,158,11,0.06); border: 1px solid rgba(245,158,11,0.3);';
+    } else if (aud.respuesta_cliente === 'NEGATIVA') {
+      badge = `<span style="background:rgba(255,255,255,0.1); color:rgba(255,255,255,0.7); padding:3px 8px; border-radius:6px; font-size:11px;">🔴 NEGATIVA</span>`;
+      cardClass = 'background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1);';
+    } else if (aud.respuesta_cliente === 'POSITIVA') {
+      if (aud.tipificacion_final === 'VENTA') {
+        badge = `<span style="background:rgba(16,185,129,0.25); color:#6ee7b7; padding:3px 8px; border-radius:6px; font-size:11px;">🎉 VENTA</span>`;
+        cardClass = 'background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.4);';
+      } else if (aud.tipificacion_final === 'PERDIDA') {
+        badge = `<span style="background:rgba(239,68,68,0.15); color:#fca5a5; padding:3px 8px; border-radius:6px; font-size:11px;">💔 PERDIDA</span>`;
+        cardClass = 'background: rgba(239,68,68,0.04); border: 1px solid rgba(239,68,68,0.2);';
+      } else {
+        badge = `<span style="background:rgba(0,168,225,0.25); color:#7dd3fc; padding:3px 8px; border-radius:6px; font-size:11px;">🔄 SEGUIMIENTO</span>`;
+        cardClass = 'background: rgba(0,168,225,0.06); border: 1px solid rgba(0,168,225,0.3);';
+      }
+    } else if (aud.respuesta_cliente === 'SIN_RESPUESTA') {
+      badge = `<span style="background:rgba(168,85,247,0.2); color:#c4b5fd; padding:3px 8px; border-radius:6px; font-size:11px;">⚪ SIN RESP.</span>`;
+      cardClass = 'background: rgba(168,85,247,0.04); border: 1px solid rgba(168,85,247,0.2);';
+    }
+  }
+  
+  const calBadge = caso.calificacion_cc.includes('AGENDA') 
+    ? '<span style="font-size:10px; color:#fbbf24;">📅 ' + caso.calificacion_cc + '</span>'
+    : '<span style="font-size:10px; color:rgba(255,255,255,0.5);">📵 ' + caso.calificacion_cc + '</span>';
+  
+  return `
+    <div style="${cardClass} border-radius: 8px; padding: 10px 12px; margin-bottom: 6px;">
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px; margin-bottom:4px;">
+        <div style="flex:1;">
+          <div style="font-weight:600; font-size:13px;">${caso.cliente_nombre || '👤 Cliente'}</div>
+          <div style="font-size:11px; color:rgba(255,255,255,0.6);">📞 ${caso.dn} · ${caso.plan_actual}</div>
+          <div style="margin-top:2px;">${calBadge}</div>
+        </div>
+        ${badge}
+      </div>
+      <button class="btn btn-secondary" style="width:100%; margin-top:6px; font-size:11px; padding:6px;" onclick="abrirCapturaWhatsapp('${actId}', '${caso.id}')">${aud ? '✏️ Editar' : '📝 Capturar'}</button>
+    </div>`;
+}
+
+// ============================================================================
+// MODAL DE CAPTURA WHATSAPP
+// ============================================================================
+let capturaWhatsappContext = null;
+
+async function abrirCapturaWhatsapp(actId, tipificacionId) {
+  // Cargar caso y auditoría existente si hay
+  const { data: caso } = await sb.from('tipificacion_diaria').select('*').eq('id', tipificacionId).single();
+  const { data: aud } = await sb.from('auditoria_whatsapp').select('*').eq('bitacora_actividad_id', actId).eq('tipificacion_id', tipificacionId).maybeSingle();
+  
+  // Buscar agente_id
+  const { data: agente } = await sb.from('agentes').select('id').eq('nombre', caso.agente_nombre).maybeSingle();
+  
+  capturaWhatsappContext = {
+    actId, 
+    tipificacionId, 
+    caso, 
+    aud: aud || {},
+    agente_id: agente?.id || null
+  };
+  
+  renderCapturaWhatsappModal();
+}
+
+async function renderCapturaWhatsappModal() {
+  const ctx = capturaWhatsappContext;
+  const { caso, aud } = ctx;
+  
+  document.getElementById('modal-body').innerHTML = `
+    <div style="background:rgba(0,168,225,0.08); border:1px solid rgba(0,168,225,0.3); border-radius:10px; padding:12px; margin-bottom:16px;">
+      <div style="font-weight:600; font-size:14px; margin-bottom:4px;">${caso.cliente_nombre || '👤 Cliente'}</div>
+      <div style="font-size:12px; color:rgba(255,255,255,0.7);">📞 ${caso.dn} · ${caso.plan_actual}</div>
+      <div style="font-size:11px; color:rgba(255,255,255,0.5); margin-top:4px;">Agente: ${caso.agente_nombre} · ${caso.calificacion_cc}</div>
+    </div>
+    
+    <!-- PREGUNTA 1: ¿Se mandó mensaje? -->
+    <div class="form-group">
+      <label>1. ¿Se mandó mensaje al cliente?</label>
+      <select id="wa-mensaje-enviado" onchange="onCambioMensajeEnviado()">
+        <option value="">-- Selecciona --</option>
+        <option value="true" ${aud.mensaje_enviado === true ? 'selected' : ''}>✅ Sí, se envió</option>
+        <option value="false" ${aud.mensaje_enviado === false ? 'selected' : ''}>❌ No se envió</option>
+      </select>
+    </div>
+    
+    <!-- Si NO se envió: aplicar sanción NO_MENSAJE -->
+    <div id="wa-no-mensaje" style="display:none;">
+      <div id="wa-sancion-no-mensaje"></div>
+    </div>
+    
+    <!-- PREGUNTA 2: ¿Mensaje personalizado? -->
+    <div id="wa-pregunta-personalizado" style="display:none;">
+      <div class="form-group">
+        <label>2. ¿El mensaje fue personalizado?</label>
+        <select id="wa-personalizado" onchange="onCambioPersonalizado()">
+          <option value="">-- Selecciona --</option>
+          <option value="true" ${aud.mensaje_personalizado === true ? 'selected' : ''}>✅ Sí, personalizado</option>
+          <option value="false" ${aud.mensaje_personalizado === false ? 'selected' : ''}>❌ No, fue genérico</option>
+        </select>
+      </div>
+    </div>
+    
+    <!-- Si NO personalizado: aplicar sanción NO_PERSONALIZADO -->
+    <div id="wa-no-personalizado" style="display:none;">
+      <div id="wa-sancion-no-personalizado"></div>
+    </div>
+    
+    <!-- PREGUNTA 3: Respuesta del cliente -->
+    <div id="wa-pregunta-respuesta" style="display:none;">
+      <div class="form-group">
+        <label>3. Respuesta del cliente</label>
+        <select id="wa-respuesta" onchange="onCambioRespuesta()">
+          <option value="">-- Selecciona --</option>
+          <option value="NEGATIVA" ${aud.respuesta_cliente === 'NEGATIVA' ? 'selected' : ''}>🔴 Negativa (no le interesa)</option>
+          <option value="POSITIVA" ${aud.respuesta_cliente === 'POSITIVA' ? 'selected' : ''}>🟢 Positiva (interesado)</option>
+          <option value="SIN_RESPUESTA" ${aud.respuesta_cliente === 'SIN_RESPUESTA' ? 'selected' : ''}>⚪ Sin respuesta aún</option>
+        </select>
+      </div>
+    </div>
+    
+    <!-- Si POSITIVA: tipificación final -->
+    <div id="wa-tipificacion-positiva" style="display:none;">
+      <div style="background:rgba(16,185,129,0.06); border:1px solid rgba(16,185,129,0.3); border-radius:10px; padding:12px; margin-bottom:12px;">
+        <p style="font-size:13px; font-weight:600; margin-bottom:8px; color:#6ee7b7;">🟢 Cliente con respuesta positiva</p>
+        <div class="form-group" style="margin-bottom:8px;">
+          <label>Tipificación</label>
+          <select id="wa-tip-final" onchange="onCambioTipFinal()">
+            <option value="">-- Selecciona --</option>
+            <option value="VENTA" ${aud.tipificacion_final === 'VENTA' ? 'selected' : ''}>🎉 Venta cerrada</option>
+            <option value="SEGUIMIENTO" ${aud.tipificacion_final === 'SEGUIMIENTO' ? 'selected' : ''}>🔄 Seguimiento</option>
+            <option value="PERDIDA" ${aud.tipificacion_final === 'PERDIDA' ? 'selected' : ''}>💔 Pérdida</option>
+          </select>
+        </div>
+        
+        <div id="wa-venta-block" style="display:none;">
+          <div class="form-group" style="margin-bottom:0;">
+            <label>Folio de la venta</label>
+            <input type="text" id="wa-folio-venta" placeholder="Ej: ABC123456" value="${aud.folio_venta || ''}" style="text-transform:uppercase;">
+            <p style="font-size:11px; color:rgba(255,255,255,0.5); margin-top:4px;">📋 Se validará automáticamente cuando se actualice el informe-semanal.</p>
+          </div>
+        </div>
+        
+        <div id="wa-seguimiento-block" style="display:none;">
+          <div class="form-group" style="margin-bottom:8px;">
+            <label>Motivo del seguimiento</label>
+            <textarea id="wa-motivo-seg" rows="2" placeholder="Por qué no cerró ahora, qué se necesita...">${aud.motivo_seguimiento || ''}</textarea>
+          </div>
+          <div class="form-group" style="margin-bottom:0;">
+            <label>📅 Fecha del próximo contacto</label>
+            <input type="date" id="wa-fecha-prox" value="${aud.fecha_proximo_seguimiento || ''}" min="${getFechaLocal(new Date())}">
+          </div>
+        </div>
+        
+        <div id="wa-perdida-block" style="display:none;">
+          <div class="form-group" style="margin-bottom:0;">
+            <label>Motivo de la pérdida</label>
+            <textarea id="wa-motivo-perdida" rows="2" placeholder="Por qué se perdió la oportunidad...">${aud.motivo_perdida || ''}</textarea>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Si SIN RESPUESTA: aviso -->
+    <div id="wa-sin-respuesta-info" style="display:none;">
+      <div style="background:rgba(168,85,247,0.06); border:1px solid rgba(168,85,247,0.3); border-radius:10px; padding:12px; margin-bottom:12px;">
+        <p style="font-size:13px; color:#c4b5fd;">⚪ Este caso quedará en la base de "sin respuesta" y aparecerá en la actividad <strong>#14 Re-auditoría WhatsApp</strong> diaria para verificar si el cliente respondió posteriormente.</p>
+      </div>
+    </div>
+    
+    <!-- Hallazgos generales (siempre) -->
+    <div class="form-group">
+      <label>Hallazgos / observaciones</label>
+      <textarea id="wa-hallazgos" rows="2" placeholder="Comentarios adicionales...">${aud.hallazgos || ''}</textarea>
+    </div>
+  `;
+  
+  document.getElementById('modal-actions').innerHTML = `
+    <button class="btn btn-secondary" onclick="renderModalWhatsapp(currentEditActividad.act, currentEditActividad.cat)">← Volver</button>
+    <button class="btn btn-success" onclick="guardarCapturaWhatsapp()">💾 Guardar</button>
+  `;
+  
+  // Inicializar visibilidades según valores existentes
+  await onCambioMensajeEnviado();
+  if (aud.mensaje_enviado === true) {
+    onCambioPersonalizado();
+    if (aud.mensaje_personalizado === true) {
+      onCambioRespuesta();
+      if (aud.respuesta_cliente === 'POSITIVA') {
+        onCambioTipFinal();
+      }
+    }
+  }
+}
+
+async function onCambioMensajeEnviado() {
+  const val = document.getElementById('wa-mensaje-enviado')?.value;
+  const noMensajeDiv = document.getElementById('wa-no-mensaje');
+  const preguntaPersDiv = document.getElementById('wa-pregunta-personalizado');
+  const sancionDiv = document.getElementById('wa-sancion-no-mensaje');
+  
+  if (val === 'false') {
+    noMensajeDiv.style.display = 'block';
+    preguntaPersDiv.style.display = 'none';
+    document.getElementById('wa-no-personalizado').style.display = 'none';
+    document.getElementById('wa-pregunta-respuesta').style.display = 'none';
+    document.getElementById('wa-tipificacion-positiva').style.display = 'none';
+    document.getElementById('wa-sin-respuesta-info').style.display = 'none';
+    
+    // Calcular sanción
+    if (capturaWhatsappContext.agente_id) {
+      const { data: result } = await sb.rpc('obtener_siguiente_sancion_whatsapp', { 
+        p_agente_id: capturaWhatsappContext.agente_id, 
+        p_tipo_falla: 'NO_MENSAJE' 
+      });
+      const sancion = result?.[0];
+      if (sancion) {
+        const col = NIVEL_COLORES[sancion.siguiente_accion];
+        sancionDiv.innerHTML = `
+          <div style="background:${col.bg}; border:1px solid ${col.text}; border-radius:8px; padding:14px; margin-bottom:12px;">
+            <p style="font-size:13px; font-weight:700; color:${col.text}; margin-bottom:6px;">${col.icon} Sanción: ${NIVEL_NOMBRES[sancion.siguiente_accion]}</p>
+            <p style="font-size:12px; color:rgba(255,255,255,0.8);">Esta sería la <strong>${sancion.num_falla}ª falla "no envió mensaje"</strong> del agente.</p>
+            ${sancion.requiere_autorizacion ? `
+              <div style="margin-top:10px; padding:10px; background:rgba(0,0,0,0.3); border-radius:6px;">
+                <p style="font-size:12px; color:#fca5a5; font-weight:600;">🔒 REQUIERE AUTORIZACIÓN DEL COORDINADOR</p>
+              </div>
+            ` : ''}
+          </div>`;
+      }
+    }
+  } else if (val === 'true') {
+    noMensajeDiv.style.display = 'none';
+    preguntaPersDiv.style.display = 'block';
+  } else {
+    noMensajeDiv.style.display = 'none';
+    preguntaPersDiv.style.display = 'none';
+  }
+}
+
+async function onCambioPersonalizado() {
+  const val = document.getElementById('wa-personalizado')?.value;
+  const noPersDiv = document.getElementById('wa-no-personalizado');
+  const preguntaRespDiv = document.getElementById('wa-pregunta-respuesta');
+  const sancionDiv = document.getElementById('wa-sancion-no-personalizado');
+  
+  if (val === 'false') {
+    noPersDiv.style.display = 'block';
+    preguntaRespDiv.style.display = 'none';
+    document.getElementById('wa-tipificacion-positiva').style.display = 'none';
+    document.getElementById('wa-sin-respuesta-info').style.display = 'none';
+    
+    if (capturaWhatsappContext.agente_id) {
+      const { data: result } = await sb.rpc('obtener_siguiente_sancion_whatsapp', { 
+        p_agente_id: capturaWhatsappContext.agente_id, 
+        p_tipo_falla: 'NO_PERSONALIZADO' 
+      });
+      const sancion = result?.[0];
+      if (sancion) {
+        const col = NIVEL_COLORES[sancion.siguiente_accion];
+        sancionDiv.innerHTML = `
+          <div style="background:${col.bg}; border:1px solid ${col.text}; border-radius:8px; padding:14px; margin-bottom:12px;">
+            <p style="font-size:13px; font-weight:700; color:${col.text}; margin-bottom:6px;">${col.icon} Sanción: ${NIVEL_NOMBRES[sancion.siguiente_accion]}</p>
+            <p style="font-size:12px; color:rgba(255,255,255,0.8);">Esta sería la <strong>${sancion.num_falla}ª falla "no personalizado"</strong> (escalamiento: 2 retros antes de carta).</p>
+            ${sancion.requiere_autorizacion ? `
+              <div style="margin-top:10px; padding:10px; background:rgba(0,0,0,0.3); border-radius:6px;">
+                <p style="font-size:12px; color:#fca5a5; font-weight:600;">🔒 REQUIERE AUTORIZACIÓN DEL COORDINADOR</p>
+              </div>
+            ` : ''}
+          </div>`;
+      }
+    }
+  } else if (val === 'true') {
+    noPersDiv.style.display = 'none';
+    preguntaRespDiv.style.display = 'block';
+  } else {
+    noPersDiv.style.display = 'none';
+    preguntaRespDiv.style.display = 'none';
+  }
+}
+
+function onCambioRespuesta() {
+  const val = document.getElementById('wa-respuesta')?.value;
+  document.getElementById('wa-tipificacion-positiva').style.display = val === 'POSITIVA' ? 'block' : 'none';
+  document.getElementById('wa-sin-respuesta-info').style.display = val === 'SIN_RESPUESTA' ? 'block' : 'none';
+}
+
+function onCambioTipFinal() {
+  const val = document.getElementById('wa-tip-final')?.value;
+  document.getElementById('wa-venta-block').style.display = val === 'VENTA' ? 'block' : 'none';
+  document.getElementById('wa-seguimiento-block').style.display = val === 'SEGUIMIENTO' ? 'block' : 'none';
+  document.getElementById('wa-perdida-block').style.display = val === 'PERDIDA' ? 'block' : 'none';
+}
+
+async function guardarCapturaWhatsapp() {
+  const ctx = capturaWhatsappContext;
+  const mensajeEnviado = document.getElementById('wa-mensaje-enviado').value;
+  
+  if (!mensajeEnviado) { alert('Responde si se envió el mensaje'); return; }
+  
+  const payload = {
+    bitacora_actividad_id: ctx.actId,
+    supervisor_id: currentSupervisor.id,
+    tipificacion_id: ctx.tipificacionId,
+    agente_id: ctx.agente_id,
+    agente_nombre: ctx.caso.agente_nombre,
+    dn_cliente: ctx.caso.dn,
+    cliente_nombre: ctx.caso.cliente_nombre,
+    plan_actual: ctx.caso.plan_actual,
+    fecha_cc: ctx.caso.fecha_cc,
+    mensaje_enviado: mensajeEnviado === 'true',
+    hallazgos: document.getElementById('wa-hallazgos').value.trim() || null,
+    estado: 'ACTIVA',
+    caso_cerrado: false
+  };
+  
+  // Si NO envió mensaje → sanción
+  if (mensajeEnviado === 'false') {
+    payload.tipo_falla = 'NO_MENSAJE';
+    if (ctx.agente_id) {
+      const { data: result } = await sb.rpc('obtener_siguiente_sancion_whatsapp', { 
+        p_agente_id: ctx.agente_id, 
+        p_tipo_falla: 'NO_MENSAJE' 
+      });
+      const sancion = result?.[0];
+      if (sancion) {
+        payload.accion_tomada = sancion.siguiente_accion;
+        payload.num_falla = sancion.num_falla;
+        payload.requiere_autorizacion = sancion.requiere_autorizacion;
+        if (sancion.requiere_autorizacion) {
+          if (!confirm(`Esta acción requiere autorización del coordinador. ¿Solicitar autorización para aplicar ${NIVEL_NOMBRES[sancion.siguiente_accion]}?`)) return;
+          payload.estado = 'PENDIENTE_AUTORIZACION';
+        }
+      }
+    }
+    payload.caso_cerrado = true;
+  } else {
+    // Sí envió: pregunta 2
+    const personalizado = document.getElementById('wa-personalizado').value;
+    if (!personalizado) { alert('Responde si el mensaje fue personalizado'); return; }
+    payload.mensaje_personalizado = personalizado === 'true';
+    
+    if (personalizado === 'false') {
+      payload.tipo_falla = 'NO_PERSONALIZADO';
+      if (ctx.agente_id) {
+        const { data: result } = await sb.rpc('obtener_siguiente_sancion_whatsapp', { 
+          p_agente_id: ctx.agente_id, 
+          p_tipo_falla: 'NO_PERSONALIZADO' 
+        });
+        const sancion = result?.[0];
+        if (sancion) {
+          payload.accion_tomada = sancion.siguiente_accion;
+          payload.num_falla = sancion.num_falla;
+          payload.requiere_autorizacion = sancion.requiere_autorizacion;
+          if (sancion.requiere_autorizacion) {
+            if (!confirm(`Esta acción requiere autorización del coordinador. ¿Solicitar autorización para aplicar ${NIVEL_NOMBRES[sancion.siguiente_accion]}?`)) return;
+            payload.estado = 'PENDIENTE_AUTORIZACION';
+          }
+        }
+      }
+      payload.caso_cerrado = true;
+    } else {
+      // Sí personalizado: pregunta 3
+      const respuesta = document.getElementById('wa-respuesta').value;
+      if (!respuesta) { alert('Responde la respuesta del cliente'); return; }
+      payload.respuesta_cliente = respuesta;
+      
+      if (respuesta === 'NEGATIVA') {
+        payload.caso_cerrado = true;
+      } else if (respuesta === 'POSITIVA') {
+        const tipFinal = document.getElementById('wa-tip-final').value;
+        if (!tipFinal) { alert('Selecciona la tipificación final'); return; }
+        payload.tipificacion_final = tipFinal;
+        
+        if (tipFinal === 'VENTA') {
+          const folio = document.getElementById('wa-folio-venta').value.trim().toUpperCase();
+          if (!folio) { alert('Captura el folio de la venta'); return; }
+          payload.folio_venta = folio;
+          payload.validacion_folio_venta = 'PENDIENTE';
+          payload.caso_cerrado = true;
+        } else if (tipFinal === 'PERDIDA') {
+          const motivo = document.getElementById('wa-motivo-perdida').value.trim();
+          if (!motivo) { alert('Captura el motivo de la pérdida'); return; }
+          payload.motivo_perdida = motivo;
+          payload.caso_cerrado = true;
+        } else if (tipFinal === 'SEGUIMIENTO') {
+          const motivo = document.getElementById('wa-motivo-seg').value.trim();
+          const fechaProx = document.getElementById('wa-fecha-prox').value;
+          if (!motivo) { alert('Captura el motivo del seguimiento'); return; }
+          if (!fechaProx) { alert('Selecciona la fecha del próximo contacto'); return; }
+          payload.motivo_seguimiento = motivo;
+          payload.fecha_proximo_seguimiento = fechaProx;
+          payload.caso_cerrado = false;
+          payload.estado = 'EN_SEGUIMIENTO';
+        }
+      } else if (respuesta === 'SIN_RESPUESTA') {
+        payload.caso_cerrado = false; // queda en base para re-auditoría
+      }
+    }
+  }
+  
+  // Upsert por (bitacora_actividad_id, tipificacion_id)
+  const { data: existing } = await sb.from('auditoria_whatsapp').select('id').eq('bitacora_actividad_id', ctx.actId).eq('tipificacion_id', ctx.tipificacionId).maybeSingle();
+  let error;
+  if (existing) {
+    ({ error } = await sb.from('auditoria_whatsapp').update(payload).eq('id', existing.id));
+  } else {
+    ({ error } = await sb.from('auditoria_whatsapp').insert(payload));
+  }
+  
+  if (error) { alert('Error: ' + error.message); return; }
+  
+  // Actualizar contador
+  const { count } = await sb.from('auditoria_whatsapp').select('*', { count: 'exact', head: true }).eq('bitacora_actividad_id', ctx.actId);
+  const { data: actUpdated } = await sb.from('bitacora_actividad').select('cantidad_objetivo').eq('id', ctx.actId).single();
+  const total = actUpdated?.cantidad_objetivo || 0;
+  let nuevoEstado = count === 0 ? 'PENDIENTE' : 'PARCIAL';
+  if (count >= total && total > 0) nuevoEstado = 'COMPLETADA';
+  await sb.from('bitacora_actividad').update({
+    cantidad_realizada: count, estado: nuevoEstado,
+    porcentaje_completado: total > 0 ? (count/total)*100 : 0
+  }).eq('id', ctx.actId);
+  
+  await renderModalWhatsapp(currentEditActividad.act, currentEditActividad.cat);
+  await loadActivities();
+}
+
+// Continuar un seguimiento desde el bloque de pendientes
+async function continuarSeguimientoWhatsapp(seguimientoId, actIdHoy) {
+  const { data: padre } = await sb.from('auditoria_whatsapp').select('*').eq('id', seguimientoId).single();
+  
+  // Crear contexto para la captura
+  capturaWhatsappContext = {
+    actId: actIdHoy,
+    tipificacionId: padre.tipificacion_id,
+    caso: {
+      dn: padre.dn_cliente,
+      cliente_nombre: padre.cliente_nombre,
+      plan_actual: padre.plan_actual,
+      agente_nombre: padre.agente_nombre,
+      fecha_cc: padre.fecha_cc,
+      calificacion_cc: 'Continuación de seguimiento'
+    },
+    aud: {
+      mensaje_enviado: true,
+      mensaje_personalizado: true,
+      respuesta_cliente: 'POSITIVA'
+    },
+    agente_id: padre.agente_id,
+    casoPadreId: seguimientoId
+  };
+  
+  // Marcar el padre como cerrado al guardar el nuevo
+  renderCapturaWhatsappModal();
 }
 
 function renderModalReporte(act, cat, evs) {
