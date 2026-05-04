@@ -1621,17 +1621,35 @@ async function guardarAuditoriaAudio(actId) {
   }
   
   if (tipificacion === 'MALA_LLAMADA') {
-    const { data: result } = await sb.rpc('obtener_siguiente_sancion', { p_agente_id: agenteId });
-    const sancion = result?.[0];
-    if (!sancion) { alert('Error calculando sanción'); return; }
+    // Verificar si HOY ya recibió sanción por mala llamada
+    const hoyLocal = getFechaLocal(new Date());
+    const { data: yaHoy } = await sb.from('auditoria_audios')
+      .select('accion_tomada')
+      .eq('agente_id', agenteId)
+      .eq('tipificacion', 'MALA_LLAMADA')
+      .not('accion_tomada', 'is', null)
+      .gte('created_at', hoyLocal + 'T00:00:00')
+      .lte('created_at', hoyLocal + 'T23:59:59')
+      .maybeSingle();
     
-    payload.accion_tomada = sancion.siguiente_accion;
-    payload.num_mala_llamada = sancion.num_mala_llamada;
-    payload.requiere_autorizacion = sancion.requiere_autorizacion;
-    
-    if (sancion.requiere_autorizacion) {
-      if (!confirm(`Esta acción requiere autorización del coordinador. ¿Solicitar autorización para aplicar ${NIVEL_NOMBRES[sancion.siguiente_accion]}?`)) return;
-      payload.estado = 'PENDIENTE_AUTORIZACION';
+    if (yaHoy) {
+      // Solo registrar la mala llamada sin sanción nueva
+      payload.accion_tomada = null;
+      payload.num_mala_llamada = null;
+      payload.requiere_autorizacion = false;
+    } else {
+      const { data: result } = await sb.rpc('obtener_siguiente_sancion', { p_agente_id: agenteId });
+      const sancion = result?.[0];
+      if (!sancion) { alert('Error calculando sanción'); return; }
+      
+      payload.accion_tomada = sancion.siguiente_accion;
+      payload.num_mala_llamada = sancion.num_mala_llamada;
+      payload.requiere_autorizacion = sancion.requiere_autorizacion;
+      
+      if (sancion.requiere_autorizacion) {
+        if (!confirm(`Esta acción requiere autorización del coordinador. ¿Solicitar autorización para aplicar ${NIVEL_NOMBRES[sancion.siguiente_accion]}?`)) return;
+        payload.estado = 'PENDIENTE_AUTORIZACION';
+      }
     }
   }
   
@@ -2064,23 +2082,42 @@ async function onCambioMensajeEnviado() {
     
     // Calcular sanción
     if (capturaWhatsappContext.agente_id) {
-      const { data: result } = await sb.rpc('obtener_siguiente_sancion_whatsapp', { 
-        p_agente_id: capturaWhatsappContext.agente_id, 
-        p_tipo_falla: 'NO_MENSAJE' 
-      });
-      const sancion = result?.[0];
-      if (sancion) {
-        const col = NIVEL_COLORES[sancion.siguiente_accion];
+      // Verificar si HOY ya recibió sanción
+      const hoyLocal = getFechaLocal(new Date());
+      const { data: yaHoy } = await sb.from('auditoria_whatsapp')
+        .select('accion_tomada')
+        .eq('agente_id', capturaWhatsappContext.agente_id)
+        .eq('tipo_falla', 'NO_MENSAJE')
+        .not('accion_tomada', 'is', null)
+        .gte('created_at', hoyLocal + 'T00:00:00')
+        .lte('created_at', hoyLocal + 'T23:59:59')
+        .maybeSingle();
+      
+      if (yaHoy) {
         sancionDiv.innerHTML = `
-          <div style="background:${col.bg}; border:1px solid ${col.text}; border-radius:8px; padding:14px; margin-bottom:12px;">
-            <p style="font-size:13px; font-weight:700; color:${col.text}; margin-bottom:6px;">${col.icon} Sanción: ${NIVEL_NOMBRES[sancion.siguiente_accion]}</p>
-            <p style="font-size:12px; color:rgba(255,255,255,0.8);">Esta sería la <strong>${sancion.num_falla}ª falla "no envió mensaje"</strong> del agente.</p>
-            ${sancion.requiere_autorizacion ? `
-              <div style="margin-top:10px; padding:10px; background:rgba(0,0,0,0.3); border-radius:6px;">
-                <p style="font-size:12px; color:#fca5a5; font-weight:600;">🔒 REQUIERE AUTORIZACIÓN DEL COORDINADOR</p>
-              </div>
-            ` : ''}
+          <div style="background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.15); border-radius:8px; padding:14px; margin-bottom:12px;">
+            <p style="font-size:13px; font-weight:700; color:rgba(255,255,255,0.8); margin-bottom:6px;">📋 Falla registrada (sin sanción adicional)</p>
+            <p style="font-size:12px; color:rgba(255,255,255,0.7);">Este agente ya recibió hoy una sanción <strong>${NIVEL_NOMBRES[yaHoy.accion_tomada]}</strong> por "no envió mensaje". Se registra la falla pero NO se aplica nueva sanción (regla: 1 sanción por día).</p>
           </div>`;
+      } else {
+        const { data: result } = await sb.rpc('obtener_siguiente_sancion_whatsapp', { 
+          p_agente_id: capturaWhatsappContext.agente_id, 
+          p_tipo_falla: 'NO_MENSAJE' 
+        });
+        const sancion = result?.[0];
+        if (sancion) {
+          const col = NIVEL_COLORES[sancion.siguiente_accion];
+          sancionDiv.innerHTML = `
+            <div style="background:${col.bg}; border:1px solid ${col.text}; border-radius:8px; padding:14px; margin-bottom:12px;">
+              <p style="font-size:13px; font-weight:700; color:${col.text}; margin-bottom:6px;">${col.icon} Sanción: ${NIVEL_NOMBRES[sancion.siguiente_accion]}</p>
+              <p style="font-size:12px; color:rgba(255,255,255,0.8);">Sería el <strong>${sancion.num_falla}er día</strong> de fallas "no envió mensaje".</p>
+              ${sancion.requiere_autorizacion ? `
+                <div style="margin-top:10px; padding:10px; background:rgba(0,0,0,0.3); border-radius:6px;">
+                  <p style="font-size:12px; color:#fca5a5; font-weight:600;">🔒 REQUIERE AUTORIZACIÓN DEL COORDINADOR</p>
+                </div>
+              ` : ''}
+            </div>`;
+        }
       }
     }
   } else if (val === 'true') {
@@ -2105,23 +2142,42 @@ async function onCambioPersonalizado() {
     document.getElementById('wa-sin-respuesta-info').style.display = 'none';
     
     if (capturaWhatsappContext.agente_id) {
-      const { data: result } = await sb.rpc('obtener_siguiente_sancion_whatsapp', { 
-        p_agente_id: capturaWhatsappContext.agente_id, 
-        p_tipo_falla: 'NO_PERSONALIZADO' 
-      });
-      const sancion = result?.[0];
-      if (sancion) {
-        const col = NIVEL_COLORES[sancion.siguiente_accion];
+      // Verificar si HOY ya recibió sanción
+      const hoyLocal = getFechaLocal(new Date());
+      const { data: yaHoy } = await sb.from('auditoria_whatsapp')
+        .select('accion_tomada')
+        .eq('agente_id', capturaWhatsappContext.agente_id)
+        .eq('tipo_falla', 'NO_PERSONALIZADO')
+        .not('accion_tomada', 'is', null)
+        .gte('created_at', hoyLocal + 'T00:00:00')
+        .lte('created_at', hoyLocal + 'T23:59:59')
+        .maybeSingle();
+      
+      if (yaHoy) {
         sancionDiv.innerHTML = `
-          <div style="background:${col.bg}; border:1px solid ${col.text}; border-radius:8px; padding:14px; margin-bottom:12px;">
-            <p style="font-size:13px; font-weight:700; color:${col.text}; margin-bottom:6px;">${col.icon} Sanción: ${NIVEL_NOMBRES[sancion.siguiente_accion]}</p>
-            <p style="font-size:12px; color:rgba(255,255,255,0.8);">Esta sería la <strong>${sancion.num_falla}ª falla "no personalizado"</strong> (escalamiento: 2 retros antes de carta).</p>
-            ${sancion.requiere_autorizacion ? `
-              <div style="margin-top:10px; padding:10px; background:rgba(0,0,0,0.3); border-radius:6px;">
-                <p style="font-size:12px; color:#fca5a5; font-weight:600;">🔒 REQUIERE AUTORIZACIÓN DEL COORDINADOR</p>
-              </div>
-            ` : ''}
+          <div style="background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.15); border-radius:8px; padding:14px; margin-bottom:12px;">
+            <p style="font-size:13px; font-weight:700; color:rgba(255,255,255,0.8); margin-bottom:6px;">📋 Falla registrada (sin sanción adicional)</p>
+            <p style="font-size:12px; color:rgba(255,255,255,0.7);">Este agente ya recibió hoy una sanción <strong>${NIVEL_NOMBRES[yaHoy.accion_tomada]}</strong> por "no personalizado". Se registra la falla pero NO se aplica nueva sanción.</p>
           </div>`;
+      } else {
+        const { data: result } = await sb.rpc('obtener_siguiente_sancion_whatsapp', { 
+          p_agente_id: capturaWhatsappContext.agente_id, 
+          p_tipo_falla: 'NO_PERSONALIZADO' 
+        });
+        const sancion = result?.[0];
+        if (sancion) {
+          const col = NIVEL_COLORES[sancion.siguiente_accion];
+          sancionDiv.innerHTML = `
+            <div style="background:${col.bg}; border:1px solid ${col.text}; border-radius:8px; padding:14px; margin-bottom:12px;">
+              <p style="font-size:13px; font-weight:700; color:${col.text}; margin-bottom:6px;">${col.icon} Sanción: ${NIVEL_NOMBRES[sancion.siguiente_accion]}</p>
+              <p style="font-size:12px; color:rgba(255,255,255,0.8);">Sería el <strong>${sancion.num_falla}er día</strong> de fallas "no personalizado" (escalamiento: 2 días de retros antes de carta).</p>
+              ${sancion.requiere_autorizacion ? `
+                <div style="margin-top:10px; padding:10px; background:rgba(0,0,0,0.3); border-radius:6px;">
+                  <p style="font-size:12px; color:#fca5a5; font-weight:600;">🔒 REQUIERE AUTORIZACIÓN DEL COORDINADOR</p>
+                </div>
+              ` : ''}
+            </div>`;
+        }
       }
     }
   } else if (val === 'true') {
@@ -2168,22 +2224,41 @@ async function guardarCapturaWhatsapp() {
     caso_cerrado: false
   };
   
-  // Si NO envió mensaje → sanción
+  // Si NO envió mensaje → posible sanción
   if (mensajeEnviado === 'false') {
     payload.tipo_falla = 'NO_MENSAJE';
     if (ctx.agente_id) {
-      const { data: result } = await sb.rpc('obtener_siguiente_sancion_whatsapp', { 
-        p_agente_id: ctx.agente_id, 
-        p_tipo_falla: 'NO_MENSAJE' 
-      });
-      const sancion = result?.[0];
-      if (sancion) {
-        payload.accion_tomada = sancion.siguiente_accion;
-        payload.num_falla = sancion.num_falla;
-        payload.requiere_autorizacion = sancion.requiere_autorizacion;
-        if (sancion.requiere_autorizacion) {
-          if (!confirm(`Esta acción requiere autorización del coordinador. ¿Solicitar autorización para aplicar ${NIVEL_NOMBRES[sancion.siguiente_accion]}?`)) return;
-          payload.estado = 'PENDIENTE_AUTORIZACION';
+      // Verificar si HOY ya recibió sanción por NO_MENSAJE (solo 1 sanción por día)
+      const hoyLocal = getFechaLocal(new Date());
+      const { data: yaHoy } = await sb.from('auditoria_whatsapp')
+        .select('id, accion_tomada')
+        .eq('agente_id', ctx.agente_id)
+        .eq('tipo_falla', 'NO_MENSAJE')
+        .not('accion_tomada', 'is', null)
+        .gte('created_at', hoyLocal + 'T00:00:00')
+        .lte('created_at', hoyLocal + 'T23:59:59')
+        .maybeSingle();
+      
+      if (yaHoy) {
+        // Ya hubo sanción hoy por mismo motivo, solo registramos sin volver a sancionar
+        payload.accion_tomada = null;
+        payload.num_falla = null;
+        payload.requiere_autorizacion = false;
+      } else {
+        // Primera falla del día, sí aplica sanción
+        const { data: result } = await sb.rpc('obtener_siguiente_sancion_whatsapp', { 
+          p_agente_id: ctx.agente_id, 
+          p_tipo_falla: 'NO_MENSAJE' 
+        });
+        const sancion = result?.[0];
+        if (sancion) {
+          payload.accion_tomada = sancion.siguiente_accion;
+          payload.num_falla = sancion.num_falla;
+          payload.requiere_autorizacion = sancion.requiere_autorizacion;
+          if (sancion.requiere_autorizacion) {
+            if (!confirm(`Esta acción requiere autorización del coordinador. ¿Solicitar autorización para aplicar ${NIVEL_NOMBRES[sancion.siguiente_accion]}?`)) return;
+            payload.estado = 'PENDIENTE_AUTORIZACION';
+          }
         }
       }
     }
@@ -2197,18 +2272,36 @@ async function guardarCapturaWhatsapp() {
     if (personalizado === 'false') {
       payload.tipo_falla = 'NO_PERSONALIZADO';
       if (ctx.agente_id) {
-        const { data: result } = await sb.rpc('obtener_siguiente_sancion_whatsapp', { 
-          p_agente_id: ctx.agente_id, 
-          p_tipo_falla: 'NO_PERSONALIZADO' 
-        });
-        const sancion = result?.[0];
-        if (sancion) {
-          payload.accion_tomada = sancion.siguiente_accion;
-          payload.num_falla = sancion.num_falla;
-          payload.requiere_autorizacion = sancion.requiere_autorizacion;
-          if (sancion.requiere_autorizacion) {
-            if (!confirm(`Esta acción requiere autorización del coordinador. ¿Solicitar autorización para aplicar ${NIVEL_NOMBRES[sancion.siguiente_accion]}?`)) return;
-            payload.estado = 'PENDIENTE_AUTORIZACION';
+        // Verificar si HOY ya recibió sanción por NO_PERSONALIZADO
+        const hoyLocal = getFechaLocal(new Date());
+        const { data: yaHoy } = await sb.from('auditoria_whatsapp')
+          .select('id, accion_tomada')
+          .eq('agente_id', ctx.agente_id)
+          .eq('tipo_falla', 'NO_PERSONALIZADO')
+          .not('accion_tomada', 'is', null)
+          .gte('created_at', hoyLocal + 'T00:00:00')
+          .lte('created_at', hoyLocal + 'T23:59:59')
+          .maybeSingle();
+        
+        if (yaHoy) {
+          // Solo registrar sin sanción nueva
+          payload.accion_tomada = null;
+          payload.num_falla = null;
+          payload.requiere_autorizacion = false;
+        } else {
+          const { data: result } = await sb.rpc('obtener_siguiente_sancion_whatsapp', { 
+            p_agente_id: ctx.agente_id, 
+            p_tipo_falla: 'NO_PERSONALIZADO' 
+          });
+          const sancion = result?.[0];
+          if (sancion) {
+            payload.accion_tomada = sancion.siguiente_accion;
+            payload.num_falla = sancion.num_falla;
+            payload.requiere_autorizacion = sancion.requiere_autorizacion;
+            if (sancion.requiere_autorizacion) {
+              if (!confirm(`Esta acción requiere autorización del coordinador. ¿Solicitar autorización para aplicar ${NIVEL_NOMBRES[sancion.siguiente_accion]}?`)) return;
+              payload.estado = 'PENDIENTE_AUTORIZACION';
+            }
           }
         }
       }
