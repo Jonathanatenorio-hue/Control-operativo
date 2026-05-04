@@ -630,6 +630,8 @@ async function abrirActividad(bitacoraActividadId) {
   else if (cat.codigo === 'AUDITORIA_AUDIOS') await renderModalAudios(act, cat);
   else if (cat.codigo === 'AUDITORIA_WHATSAPP') await renderModalWhatsapp(act, cat);
   else if (cat.codigo === 'REAUDITORIA_WHATSAPP') await renderModalReauditoria(act, cat);
+  else if (cat.codigo === 'AGENTES_SIN_VENTA') await renderModalSinActividad(act, cat, 'SIN_VENTA');
+  else if (cat.codigo === 'AGENTES_SIN_PROGRAMAR') await renderModalSinActividad(act, cat, 'SIN_PROGRAMAR');
   else if (cat.cuota_tipo === 'POR_AGENTE') renderModalAuditoria(act, cat, evs);
   else renderModalReporte(act, cat, evs);
   
@@ -2888,6 +2890,570 @@ async function guardarVerificacionReauditoria() {
   }).eq('id', ctx.actIdHoy);
   
   await renderModalReauditoria(currentEditActividad.act, currentEditActividad.cat);
+  await loadActivities();
+}
+
+// ============================================================================
+// SEGUIMIENTO SIN ACTIVIDAD (sin venta / sin programar)
+// ============================================================================
+
+const TIPO_LABELS = {
+  'SIN_VENTA': { titulo: 'sin venta', verbo: 'activar', verbo_pasado: 'activó', col_fecha: 'fecha_activacion' },
+  'SIN_PROGRAMAR': { titulo: 'sin programar', verbo: 'programar', verbo_pasado: 'programó', col_fecha: 'fecha_bo' }
+};
+
+// Calcular días sin actividad considerando que sábado = medio día
+// y domingo no cuenta
+function calcularDiasSinActividad(fechaUltima) {
+  if (!fechaUltima) return 999; // nunca tuvo actividad
+  
+  const ahora = new Date();
+  const ultima = new Date(fechaUltima + 'T12:00:00');
+  
+  let dias = 0;
+  const cursor = new Date(ultima);
+  cursor.setDate(cursor.getDate() + 1); // empezar al día siguiente
+  
+  while (cursor < ahora) {
+    const dow = cursor.getDay();
+    if (dow === 6) dias += 0.5;       // sábado = medio día
+    else if (dow === 0) dias += 0;    // domingo = no cuenta
+    else dias += 1;                    // lunes-viernes = día completo
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return dias;
+}
+
+async function renderModalSinActividad(act, cat, tipo) {
+  document.getElementById('modal-body').innerHTML = `<div style="text-align:center; padding:40px;"><div class="loader"></div><p style="margin-top:12px; color:rgba(255,255,255,0.6); font-size:13px;">Analizando agentes en foco rojo...</p></div>`;
+  document.getElementById('modal-actions').innerHTML = `<button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>`;
+  
+  try {
+    const labels = TIPO_LABELS[tipo];
+    const UMBRAL_DIAS = 3.5;
+    
+    // 1. Cargar agentes activos del supervisor
+    const agentesPresentesIdsLocal = agentesActivos.filter(a => agentesPresentesIds.includes(a.id));
+    if (agentesActivos.length === 0) {
+      document.getElementById('modal-body').innerHTML = '<div class="empty-state">Sin agentes activos en tu equipo.</div>';
+      return;
+    }
+    
+    // Obtener nombres del supervisor (variantes)
+    const mapeo = await getMapeoSupervisor();
+    const nombresSupervisor = [currentSupervisor.nombre];
+    mapeo.forEach(m => {
+      if (m.supervisor_id === currentSupervisor.id && !nombresSupervisor.includes(m.nombre_origen)) {
+        nombresSupervisor.push(m.nombre_origen);
+      }
+    });
+    
+    // 2. Para cada agente, obtener su última activación / programación del informe-semanal
+    const fechaCol = labels.col_fecha;
+    const filtroEstatus = tipo === 'SIN_VENTA' ? 'activada' : null;
+    
+    const enFocoRojo = [];
+    
+    for (const agente of agentesActivos) {
+      // Buscar la fecha de última actividad
+      let query = sbInforme.from('ventas_detalle')
+        .select(`folio, ${fechaCol}, estatus`)
+        .eq('ejecutivo', agente.nombre)
+        .not(fechaCol, 'is', null);
+      
+      if (filtroEstatus) query = query.eq('estatus', filtroEstatus);
+      
+      const { data: registros } = await query.order(fechaCol, { ascending: false }).limit(1);
+      
+      const ultimaFecha = registros && registros.length > 0 ? registros[0][fechaCol] : null;
+      const dias = calcularDiasSinActividad(ultimaFecha);
+      
+      if (dias >= UMBRAL_DIAS) {
+        enFocoRojo.push({
+          agente_id: agente.id,
+          agente_nombre: agente.nombre,
+          dias_sin_actividad: Math.round(dias * 10) / 10,
+          fecha_ultima: ultimaFecha
+        });
+      }
+    }
+    
+    // 3. Cargar registros previos en seguimiento_sin_actividad para cada uno
+    const agenteIdsFoco = enFocoRojo.map(a => a.agente_id);
+    let registrosPrevios = {};
+    let registrosHoy = {};
+    let pendientesVerificar = {};
+    
+    if (agenteIdsFoco.length > 0) {
+      // Histórico de cada uno (para ver veces previas)
+      const { data: hist } = await sb.from('seguimiento_sin_actividad')
+        .select('*')
+        .eq('tipo', tipo)
+        .in('agente_id', agenteIdsFoco)
+        .order('created_at', { ascending: false });
+      
+      (hist || []).forEach(h => {
+        if (!registrosPrevios[h.agente_id]) registrosPrevios[h.agente_id] = [];
+        registrosPrevios[h.agente_id].push(h);
+      });
+      
+      // Registros HOY para esta bitácora
+      const { data: hoyRegs } = await sb.from('seguimiento_sin_actividad')
+        .select('*')
+        .eq('bitacora_actividad_id', act.id);
+      (hoyRegs || []).forEach(h => { registrosHoy[h.agente_id] = h; });
+      
+      // Pendientes de verificar (de días anteriores)
+      const hoyLocal = getFechaLocal(new Date());
+      const { data: pendVer } = await sb.from('seguimiento_sin_actividad')
+        .select('*')
+        .eq('supervisor_id', currentSupervisor.id)
+        .eq('tipo', tipo)
+        .is('cumplio_compromiso', null)
+        .lte('fecha_verificacion', hoyLocal)
+        .neq('bitacora_actividad_id', act.id);  // no incluir los de hoy
+      (pendVer || []).forEach(p => { pendientesVerificar[p.agente_id] = p; });
+    }
+    
+    // 4. Marcar cuota (cuántos están en foco rojo HOY)
+    if (act.cantidad_objetivo !== enFocoRojo.length) {
+      await sb.from('bitacora_actividad').update({ cantidad_objetivo: enFocoRojo.length }).eq('id', act.id);
+    }
+    
+    // 5. Render
+    if (enFocoRojo.length === 0) {
+      document.getElementById('modal-body').innerHTML = `
+        <div style="text-align:center; padding:40px;">
+          <h3 style="font-size:16px; margin-bottom:8px; color:#6ee7b7;">✅ Sin agentes en foco rojo</h3>
+          <p style="font-size:13px; color:rgba(255,255,255,0.6);">Ningún agente de tu equipo lleva ${UMBRAL_DIAS}+ días ${labels.titulo}. ¡Buen trabajo!</p>
+          <button class="btn btn-success" style="margin-top:20px;" onclick="marcarSinActividadCompleta('${act.id}')">Marcar actividad como completada ✓</button>
+        </div>`;
+      return;
+    }
+    
+    // Verificar pendientes primero
+    let pendientesHTML = '';
+    const agentesConPendiente = enFocoRojo.filter(a => pendientesVerificar[a.agente_id]);
+    if (agentesConPendiente.length > 0) {
+      pendientesHTML = `
+        <div style="background:rgba(245,158,11,0.06); border:1px solid rgba(245,158,11,0.4); border-radius:12px; padding:14px; margin-bottom:16px;">
+          <p style="font-size:13px; font-weight:700; margin-bottom:10px; color:#fbbf24; text-transform:uppercase; letter-spacing:1px;">🔄 Verificar compromisos previos (${agentesConPendiente.length})</p>
+          <p style="font-size:11px; color:rgba(255,255,255,0.6); margin-bottom:12px;">Estos agentes tenían un compromiso del día anterior. Verifica si lo cumplieron.</p>
+          ${agentesConPendiente.map(a => {
+            const pend = pendientesVerificar[a.agente_id];
+            return `
+              <div style="background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:10px; padding:12px; margin-bottom:8px;">
+                <div style="font-weight:600; font-size:14px; margin-bottom:4px;">👤 ${a.agente_nombre}</div>
+                <div style="font-size:11px; color:rgba(255,255,255,0.6); margin-bottom:6px;">📅 Compromiso del ${new Date(pend.created_at).toLocaleDateString('es-MX',{day:'2-digit', month:'short'})} · Fecha verificación: ${pend.fecha_verificacion}</div>
+                <div style="font-size:12px; padding:8px; background:rgba(0,0,0,0.2); border-radius:6px; margin-bottom:8px;">📝 ${pend.compromiso || 'Sin compromiso registrado'}</div>
+                <button class="btn" style="width:100%; font-size:12px; padding:8px;" onclick="verificarCompromisoSinActividad('${pend.id}', '${a.agente_id}', '${a.agente_nombre}', '${tipo}', '${act.id}')">🔍 Verificar este caso</button>
+              </div>`;
+          }).join('')}
+        </div>`;
+    }
+    
+    // Agentes en foco hoy (los nuevos o sin pendiente de ayer)
+    const sinPendiente = enFocoRojo.filter(a => !pendientesVerificar[a.agente_id]);
+    let nuevosHTML = '';
+    if (sinPendiente.length > 0) {
+      nuevosHTML = sinPendiente.map(a => {
+        const yaCapturado = registrosHoy[a.agente_id];
+        const previos = registrosPrevios[a.agente_id] || [];
+        const vecesPrevias = previos.filter(p => p.id !== yaCapturado?.id).length;
+        const sancionesPrevias = previos.filter(p => p.accion_tomada).length;
+        const ultimaSancion = previos.find(p => p.accion_tomada);
+        
+        // Color según severidad
+        let colBorde = 'rgba(245,158,11,0.4)';
+        let colBg = 'rgba(245,158,11,0.04)';
+        if (sancionesPrevias >= 2) { colBorde = 'rgba(239,68,68,0.5)'; colBg = 'rgba(239,68,68,0.06)'; }
+        else if (a.dias_sin_actividad >= 5) { colBorde = 'rgba(239,68,68,0.4)'; colBg = 'rgba(239,68,68,0.04)'; }
+        
+        return `
+          <div style="background:${colBg}; border:1px solid ${colBorde}; border-radius:10px; padding:12px 14px; margin-bottom:8px;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:6px;">
+              <div style="flex:1;">
+                <div style="font-weight:600; font-size:14px;">👤 ${a.agente_nombre}</div>
+                <div style="font-size:12px; color:rgba(255,255,255,0.7); margin-top:2px;">
+                  🚨 <strong>${a.dias_sin_actividad} día(s)</strong> sin ${labels.verbo}
+                  ${a.fecha_ultima ? ` · Última: ${a.fecha_ultima}` : ' · Nunca ha tenido actividad'}
+                </div>
+                ${vecesPrevias > 0 ? `
+                  <div style="font-size:11px; color:#fbbf24; margin-top:4px;">
+                    ⚠️ Veces previas en foco rojo: <strong>${vecesPrevias}</strong>
+                    ${sancionesPrevias > 0 ? ` · Sanciones: <strong>${sancionesPrevias}</strong>${ultimaSancion ? ` (última: ${NIVEL_NOMBRES[ultimaSancion.accion_tomada]})` : ''}` : ''}
+                  </div>
+                ` : ''}
+              </div>
+              ${yaCapturado ? '<span style="background:rgba(16,185,129,0.2); color:#6ee7b7; padding:3px 8px; border-radius:6px; font-size:11px;">✓ CAPTURADO</span>' : '<span style="background:rgba(255,255,255,0.1); color:rgba(255,255,255,0.7); padding:3px 8px; border-radius:6px; font-size:11px;">⏳ PENDIENTE</span>'}
+            </div>
+            ${yaCapturado ? `
+              <div style="font-size:11px; color:rgba(255,255,255,0.6); padding:6px 8px; background:rgba(0,0,0,0.2); border-radius:6px; margin-top:6px;">
+                📝 ${yaCapturado.compromiso || ''}
+              </div>
+            ` : ''}
+            <button class="btn btn-secondary" style="width:100%; margin-top:8px; font-size:12px; padding:8px;" 
+              onclick="capturarSinActividad('${a.agente_id}', '${a.agente_nombre}', '${tipo}', '${act.id}', ${a.dias_sin_actividad}, '${a.fecha_ultima || ''}')">
+              ${yaCapturado ? '✏️ Editar compromiso' : '📝 Capturar plan de acción'}
+            </button>
+          </div>`;
+      }).join('');
+    }
+    
+    document.getElementById('modal-body').innerHTML = `
+      <div style="background:rgba(239,68,68,0.06); border:1px solid rgba(239,68,68,0.3); border-radius:10px; padding:14px; margin-bottom:16px;">
+        <p style="font-size:13px; font-weight:700; color:#fca5a5; margin-bottom:4px;">🚨 Agentes ${labels.titulo} (3.5+ días)</p>
+        <p style="font-size:11px; color:rgba(255,255,255,0.6);">Detectados automáticamente del informe-semanal. Sábado cuenta como medio día, domingo no cuenta.</p>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(110px, 1fr)); gap:6px; margin-top:10px;">
+          <div style="background:rgba(255,255,255,0.05); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700;">${enFocoRojo.length}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">EN FOCO</div></div>
+          <div style="background:rgba(245,158,11,0.1); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#fbbf24;">${agentesConPendiente.length}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">VERIFICAR</div></div>
+          <div style="background:rgba(16,185,129,0.1); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#6ee7b7;">${Object.keys(registrosHoy).length}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">CAPTURADOS</div></div>
+        </div>
+      </div>
+      
+      ${pendientesHTML}
+      
+      ${sinPendiente.length > 0 ? `
+        <div style="margin-top:16px;">
+          <p style="font-size:12px; font-weight:700; margin-bottom:10px; color:rgba(255,255,255,0.8); text-transform:uppercase; letter-spacing:1px;">📋 Capturar plan de acción</p>
+          <div style="max-height:500px; overflow-y:auto;">${nuevosHTML}</div>
+        </div>
+      ` : ''}
+    `;
+  } catch (err) {
+    console.error(err);
+    document.getElementById('modal-body').innerHTML = `<div class="error-msg show">Error: ${err.message}</div>`;
+  }
+}
+
+async function marcarSinActividadCompleta(actId) {
+  await sb.from('bitacora_actividad').update({
+    estado: 'COMPLETADA', cantidad_realizada: 0, cantidad_objetivo: 0,
+    porcentaje_completado: 100, comentarios: 'Sin agentes en foco rojo'
+  }).eq('id', actId);
+  closeModal();
+  await loadActivities();
+}
+
+// ============================================================================
+// CAPTURAR plan de acción para un agente en foco rojo
+// ============================================================================
+let capturaSinActContext = null;
+
+async function capturarSinActividad(agenteId, agenteNombre, tipo, actId, dias, fechaUltima) {
+  // Cargar registro existente si hay
+  const { data: existing } = await sb.from('seguimiento_sin_actividad')
+    .select('*')
+    .eq('bitacora_actividad_id', actId)
+    .eq('agente_id', agenteId)
+    .maybeSingle();
+  
+  capturaSinActContext = { agenteId, agenteNombre, tipo, actId, dias, fechaUltima, existing: existing || {} };
+  
+  const labels = TIPO_LABELS[tipo];
+  const cap = existing || {};
+  
+  document.getElementById('modal-body').innerHTML = `
+    <div style="background:rgba(239,68,68,0.06); border:1px solid rgba(239,68,68,0.3); border-radius:10px; padding:12px; margin-bottom:16px;">
+      <div style="font-weight:600; font-size:14px;">👤 ${agenteNombre}</div>
+      <div style="font-size:12px; color:rgba(255,255,255,0.7); margin-top:4px;">🚨 ${dias} día(s) sin ${labels.verbo}${fechaUltima ? ` · Última: ${fechaUltima}` : ''}</div>
+    </div>
+    
+    <div class="form-group">
+      <label>¿Cuál es la causa raíz?</label>
+      <select id="sa-causa">
+        <option value="">-- Selecciona --</option>
+        <option value="FALTA_PROSPECCION" ${cap.causa_raiz === 'FALTA_PROSPECCION' ? 'selected' : ''}>Falta de prospección</option>
+        <option value="MALA_GESTION_LEADS" ${cap.causa_raiz === 'MALA_GESTION_LEADS' ? 'selected' : ''}>Mala gestión de leads</option>
+        <option value="PROBLEMAS_CIERRE" ${cap.causa_raiz === 'PROBLEMAS_CIERRE' ? 'selected' : ''}>Problemas de cierre</option>
+        <option value="ACTITUD_BAJA" ${cap.causa_raiz === 'ACTITUD_BAJA' ? 'selected' : ''}>Actitud / motivación baja</option>
+        <option value="DESCONOCIMIENTO_PRODUCTO" ${cap.causa_raiz === 'DESCONOCIMIENTO_PRODUCTO' ? 'selected' : ''}>Desconocimiento de producto</option>
+        <option value="PROBLEMAS_PERSONALES" ${cap.causa_raiz === 'PROBLEMAS_PERSONALES' ? 'selected' : ''}>Problemas personales reportados</option>
+        <option value="OTRO" ${cap.causa_raiz === 'OTRO' ? 'selected' : ''}>Otro</option>
+      </select>
+    </div>
+    
+    <div class="form-group">
+      <label>Compromiso del agente / plan de acción</label>
+      <textarea id="sa-compromiso" rows="3" placeholder="Qué se compromete a hacer hoy/mañana para revertir...">${cap.compromiso || ''}</textarea>
+    </div>
+    
+    <div style="background:rgba(0,168,225,0.06); border:1px solid rgba(0,168,225,0.3); border-radius:8px; padding:10px; margin-bottom:12px;">
+      <p style="font-size:11px; color:rgba(255,255,255,0.7);">📅 Mañana el sistema verificará si el agente ya ${labels.verbo_pasado}. Si no, revisará sus auditorías de ayer y aplicará sanción si fueron negativas.</p>
+    </div>
+  `;
+  
+  document.getElementById('modal-actions').innerHTML = `
+    <button class="btn btn-secondary" onclick="renderModalSinActividad(currentEditActividad.act, currentEditActividad.cat, '${tipo}')">← Volver</button>
+    <button class="btn btn-success" onclick="guardarSinActividad()">💾 Guardar</button>
+  `;
+}
+
+async function guardarSinActividad() {
+  const ctx = capturaSinActContext;
+  const causa = document.getElementById('sa-causa').value;
+  const compromiso = document.getElementById('sa-compromiso').value.trim();
+  
+  if (!causa) { alert('Selecciona la causa raíz'); return; }
+  if (!compromiso) { alert('Captura el compromiso/plan de acción'); return; }
+  
+  // Fecha de verificación: mañana (siguiente día laboral)
+  const manana = new Date();
+  manana.setDate(manana.getDate() + 1);
+  if (manana.getDay() === 0) manana.setDate(manana.getDate() + 1); // si es domingo, +1
+  const fechaVerif = getFechaLocal(manana);
+  
+  const payload = {
+    bitacora_actividad_id: ctx.actId,
+    supervisor_id: currentSupervisor.id,
+    agente_id: ctx.agenteId,
+    agente_nombre: ctx.agenteNombre,
+    tipo: ctx.tipo,
+    dias_sin_actividad: ctx.dias,
+    fecha_ultima_actividad: ctx.fechaUltima || null,
+    compromiso: compromiso,
+    causa_raiz: causa,
+    fecha_verificacion: fechaVerif,
+    estado: 'ACTIVA'
+  };
+  
+  let error;
+  if (ctx.existing && ctx.existing.id) {
+    ({ error } = await sb.from('seguimiento_sin_actividad').update(payload).eq('id', ctx.existing.id));
+  } else {
+    ({ error } = await sb.from('seguimiento_sin_actividad').insert(payload));
+  }
+  
+  if (error) { alert('Error: ' + error.message); return; }
+  
+  // Actualizar contador
+  const { count } = await sb.from('seguimiento_sin_actividad').select('*', { count: 'exact', head: true }).eq('bitacora_actividad_id', ctx.actId);
+  const { data: actUpdated } = await sb.from('bitacora_actividad').select('cantidad_objetivo').eq('id', ctx.actId).single();
+  const total = actUpdated?.cantidad_objetivo || 0;
+  let nuevoEstado = count === 0 ? 'PENDIENTE' : 'PARCIAL';
+  if (count >= total && total > 0) nuevoEstado = 'COMPLETADA';
+  await sb.from('bitacora_actividad').update({
+    cantidad_realizada: count, estado: nuevoEstado,
+    porcentaje_completado: total > 0 ? (count/total)*100 : 0
+  }).eq('id', ctx.actId);
+  
+  await renderModalSinActividad(currentEditActividad.act, currentEditActividad.cat, ctx.tipo);
+  await loadActivities();
+}
+
+// ============================================================================
+// VERIFICAR si cumplió el compromiso de ayer
+// ============================================================================
+let verificarSinActContext = null;
+
+async function verificarCompromisoSinActividad(seguimientoId, agenteId, agenteNombre, tipo, actIdHoy) {
+  const { data: padre } = await sb.from('seguimiento_sin_actividad').select('*').eq('id', seguimientoId).single();
+  const labels = TIPO_LABELS[tipo];
+  
+  // Verificar automáticamente en el informe-semanal si ya activó/programó después de la fecha del compromiso
+  const fechaCompromiso = padre.created_at.split('T')[0];
+  const fechaCol = labels.col_fecha;
+  const filtroEstatus = tipo === 'SIN_VENTA' ? 'activada' : null;
+  
+  let query = sbInforme.from('ventas_detalle')
+    .select(`folio, ${fechaCol}, estatus`)
+    .eq('ejecutivo', agenteNombre)
+    .gt(fechaCol, fechaCompromiso);
+  if (filtroEstatus) query = query.eq('estatus', filtroEstatus);
+  
+  const { data: nuevas } = await query.order(fechaCol, { ascending: false }).limit(1);
+  const yaActivo = nuevas && nuevas.length > 0;
+  
+  // Si SÍ activó/programó → marcar como cumplido directamente
+  if (yaActivo) {
+    if (!confirm(`✅ El sistema detectó que el agente ya ${labels.verbo_pasado} el ${nuevas[0][fechaCol]}. ¿Marcar el compromiso como cumplido?`)) return;
+    
+    await sb.from('seguimiento_sin_actividad').update({
+      cumplio_compromiso: true,
+      fecha_evaluacion: new Date().toISOString(),
+      estado: 'CASO_RESUELTO',
+      caso_cerrado: true
+    }).eq('id', seguimientoId);
+    
+    await renderModalSinActividad(currentEditActividad.act, currentEditActividad.cat, tipo);
+    await loadActivities();
+    return;
+  }
+  
+  // Si NO activó → revisar auditorías de los días recientes
+  const fechaDesde = new Date(fechaCompromiso);
+  fechaDesde.setDate(fechaDesde.getDate());
+  const fechaDesdeStr = getFechaLocal(fechaDesde);
+  
+  // Cargar auditorías recientes del agente
+  const [audsAudios, audsWa, postventa] = await Promise.all([
+    sb.from('auditoria_audios').select('tipificacion, compromiso_cumplido, created_at').eq('agente_id', agenteId).gte('created_at', fechaDesdeStr),
+    sb.from('auditoria_whatsapp').select('mensaje_enviado, mensaje_personalizado, tipificacion_final, created_at').eq('agente_id', agenteId).gte('created_at', fechaDesdeStr),
+    sb.from('recurso_postventa').select('estatus_contacto, tipificacion, created_at').eq('agente_nombre', agenteNombre).gte('created_at', fechaDesdeStr)
+  ]);
+  
+  // Evaluar si TODAS son positivas
+  const audios = audsAudios.data || [];
+  const wa = audsWa.data || [];
+  const pv = postventa.data || [];
+  
+  const audiosOK = audios.length === 0 || audios.every(a => a.tipificacion === 'CORRECTA' || (a.tipificacion === 'AREAS_OPORTUNIDAD' && a.compromiso_cumplido !== false));
+  const waOK = wa.length === 0 || wa.every(a => a.mensaje_enviado === true && a.mensaje_personalizado !== false);
+  const pvOK = pv.length === 0 || pv.every(p => p.estatus_contacto === 'CONTACTADO' || p.tipificacion);
+  
+  const todasPositivas = audiosOK && waOK && pvOK;
+  
+  let detalle = '';
+  detalle += `Audios (${audios.length}): ${audiosOK ? '✅' : '❌'} | `;
+  detalle += `WhatsApp (${wa.length}): ${waOK ? '✅' : '❌'} | `;
+  detalle += `Postventa (${pv.length}): ${pvOK ? '✅' : '❌'}`;
+  
+  verificarSinActContext = {
+    seguimientoId, agenteId, agenteNombre, tipo, actIdHoy,
+    todasPositivas, detalle, padre,
+    audios, wa, pv
+  };
+  
+  // Mostrar pantalla de decisión
+  let sancionInfo = '';
+  if (!todasPositivas) {
+    // Calcular siguiente sanción
+    const { data: result } = await sb.rpc('obtener_siguiente_sancion_actividad', { 
+      p_agente_id: agenteId, 
+      p_tipo: tipo 
+    });
+    const sancion = result?.[0];
+    if (sancion) {
+      const col = NIVEL_COLORES[sancion.siguiente_accion];
+      sancionInfo = `
+        <div style="background:${col.bg}; border:1px solid ${col.text}; border-radius:8px; padding:14px; margin-bottom:12px;">
+          <p style="font-size:13px; font-weight:700; color:${col.text}; margin-bottom:6px;">${col.icon} Sanción: ${NIVEL_NOMBRES[sancion.siguiente_accion]}</p>
+          <p style="font-size:12px; color:rgba(255,255,255,0.8);">Sería la <strong>${sancion.num_sancion}ª sanción</strong> del agente por "${labels.titulo}".</p>
+          ${sancion.requiere_autorizacion ? `
+            <div style="margin-top:10px; padding:10px; background:rgba(0,0,0,0.3); border-radius:6px;">
+              <p style="font-size:12px; color:#fca5a5; font-weight:600;">🔒 REQUIERE AUTORIZACIÓN DEL COORDINADOR</p>
+            </div>
+          ` : ''}
+        </div>`;
+      verificarSinActContext.sancion = sancion;
+    }
+  }
+  
+  document.getElementById('modal-body').innerHTML = `
+    <div style="background:rgba(245,158,11,0.06); border:1px solid rgba(245,158,11,0.3); border-radius:10px; padding:12px; margin-bottom:16px;">
+      <div style="font-weight:600; font-size:14px;">👤 ${agenteNombre}</div>
+      <div style="font-size:12px; color:rgba(255,255,255,0.7); margin-top:4px;">📅 Compromiso del ${new Date(padre.created_at).toLocaleDateString('es-MX',{day:'2-digit', month:'short'})}</div>
+      <div style="font-size:12px; padding:8px; background:rgba(0,0,0,0.2); border-radius:6px; margin-top:6px;">📝 ${padre.compromiso}</div>
+    </div>
+    
+    <div style="background:rgba(239,68,68,0.06); border:1px solid rgba(239,68,68,0.3); border-radius:10px; padding:14px; margin-bottom:12px;">
+      <p style="font-size:13px; font-weight:600; color:#fca5a5; margin-bottom:4px;">❌ NO ${labels.verbo_pasado.toUpperCase()}</p>
+      <p style="font-size:12px; color:rgba(255,255,255,0.7);">El sistema verificó el informe-semanal y el agente no ha ${labels.verbo_pasado} desde el compromiso.</p>
+    </div>
+    
+    <div style="background:${todasPositivas ? 'rgba(16,185,129,0.06)' : 'rgba(239,68,68,0.06)'}; border:1px solid ${todasPositivas ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.3)'}; border-radius:10px; padding:14px; margin-bottom:12px;">
+      <p style="font-size:13px; font-weight:600; color:${todasPositivas ? '#6ee7b7' : '#fca5a5'}; margin-bottom:6px;">
+        ${todasPositivas ? '✅ Auditorías POSITIVAS' : '❌ Auditorías NEGATIVAS'}
+      </p>
+      <p style="font-size:11px; color:rgba(255,255,255,0.7); font-family:monospace;">${detalle}</p>
+      <p style="font-size:12px; color:rgba(255,255,255,0.8); margin-top:8px;">
+        ${todasPositivas 
+          ? '✅ El agente está ejecutando bien lo que controla. NO se aplica sanción. Capture nuevo plan de acción.'
+          : '❌ El agente NO está ejecutando bien lo que controla. Se aplicará sanción.'}
+      </p>
+    </div>
+    
+    ${sancionInfo}
+    
+    ${todasPositivas ? `
+      <div class="form-group">
+        <label>Nuevo compromiso / plan de acción</label>
+        <textarea id="sa-nuevo-compromiso" rows="3" placeholder="Qué se compromete ahora..."></textarea>
+      </div>
+    ` : ''}
+    
+    <div class="form-group">
+      <label>Notas / observaciones</label>
+      <textarea id="sa-notas-verif" rows="2" placeholder="Comentarios..."></textarea>
+    </div>
+  `;
+  
+  document.getElementById('modal-actions').innerHTML = `
+    <button class="btn btn-secondary" onclick="renderModalSinActividad(currentEditActividad.act, currentEditActividad.cat, '${tipo}')">← Volver</button>
+    <button class="btn btn-success" onclick="guardarVerificacionSinActividad()">${todasPositivas ? '💾 Guardar nuevo compromiso' : '🚨 Aplicar sanción'}</button>
+  `;
+}
+
+async function guardarVerificacionSinActividad() {
+  const ctx = verificarSinActContext;
+  const labels = TIPO_LABELS[ctx.tipo];
+  const notas = document.getElementById('sa-notas-verif').value.trim();
+  
+  // Actualizar el registro padre con el resultado de la verificación
+  const updates = {
+    cumplio_compromiso: false,  // no cumplió (ya verificamos)
+    fecha_evaluacion: new Date().toISOString(),
+    auditorias_revisadas: true,
+    auditorias_positivas: ctx.todasPositivas,
+    detalle_auditorias: ctx.detalle
+  };
+  
+  if (notas) {
+    updates.detalle_auditorias = ctx.detalle + ' | Notas: ' + notas;
+  }
+  
+  if (ctx.todasPositivas) {
+    // No sanciona: cierra este compromiso pero crea uno nuevo
+    const nuevoCompromiso = document.getElementById('sa-nuevo-compromiso').value.trim();
+    if (!nuevoCompromiso) { alert('Captura el nuevo compromiso'); return; }
+    
+    updates.estado = 'CASO_RESUELTO';
+    updates.caso_cerrado = true;
+    
+    await sb.from('seguimiento_sin_actividad').update(updates).eq('id', ctx.seguimientoId);
+    
+    // Crear nuevo registro con el siguiente compromiso
+    const manana = new Date();
+    manana.setDate(manana.getDate() + 1);
+    if (manana.getDay() === 0) manana.setDate(manana.getDate() + 1);
+    
+    await sb.from('seguimiento_sin_actividad').insert({
+      bitacora_actividad_id: ctx.actIdHoy,
+      supervisor_id: currentSupervisor.id,
+      agente_id: ctx.agenteId,
+      agente_nombre: ctx.agenteNombre,
+      tipo: ctx.tipo,
+      dias_sin_actividad: ctx.padre.dias_sin_actividad,
+      fecha_ultima_actividad: ctx.padre.fecha_ultima_actividad,
+      compromiso: nuevoCompromiso,
+      causa_raiz: ctx.padre.causa_raiz,
+      fecha_verificacion: getFechaLocal(manana),
+      estado: 'ACTIVA'
+    });
+    
+    alert('✅ Sin sanción. Las auditorías están bien. Nuevo compromiso registrado para mañana.');
+  } else {
+    // Aplica sanción
+    const sancion = ctx.sancion;
+    if (!sancion) { alert('Error calculando sanción'); return; }
+    
+    updates.accion_tomada = sancion.siguiente_accion;
+    updates.num_sancion = sancion.num_sancion;
+    updates.requiere_autorizacion = sancion.requiere_autorizacion;
+    
+    if (sancion.requiere_autorizacion) {
+      if (!confirm(`Esta acción requiere autorización del coordinador. ¿Solicitar autorización para aplicar ${NIVEL_NOMBRES[sancion.siguiente_accion]}?`)) return;
+      updates.estado = 'PENDIENTE_AUTORIZACION';
+    } else {
+      updates.estado = 'CASO_RESUELTO';
+      updates.caso_cerrado = true;
+    }
+    
+    await sb.from('seguimiento_sin_actividad').update(updates).eq('id', ctx.seguimientoId);
+    alert(`🚨 Sanción aplicada: ${NIVEL_NOMBRES[sancion.siguiente_accion]}${sancion.requiere_autorizacion ? ' (pendiente de autorización del coordinador)' : ''}`);
+  }
+  
+  await renderModalSinActividad(currentEditActividad.act, currentEditActividad.cat, ctx.tipo);
   await loadActivities();
 }
 
