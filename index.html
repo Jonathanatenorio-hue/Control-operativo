@@ -721,21 +721,19 @@ function renderModalAuditoria(act, cat, evs) {
 // Calcular fecha del día anterior operativo (lunes → sábado)
 function getFechaVentas() {
   const hoy = new Date();
-  // En modo demo simulamos que es lunes
-  const dow = DEMO_MODE ? 1 : hoy.getDay(); // 0=dom, 1=lun, ...
   const ayer = new Date(hoy);
   
-  if (dow === 1) {
-    // Lunes → sábado
-    // Si hoy es lunes real, restamos 2 días
-    // Si hoy es domingo (modo demo simulando lunes), restamos 1 día para llegar al sábado
-    if (DEMO_MODE && hoy.getDay() === 0) {
-      ayer.setDate(hoy.getDate() - 1); // domingo - 1 = sábado
-    } else {
-      ayer.setDate(hoy.getDate() - 2); // lunes - 2 = sábado
-    }
-  } else {
+  if (DEMO_MODE) {
+    // En modo demo, siempre restamos 1 día (si es domingo → sábado)
     ayer.setDate(hoy.getDate() - 1);
+  } else {
+    const dow = hoy.getDay(); // 0=dom, 1=lun, ...
+    if (dow === 1) {
+      // Lunes real → sábado (restar 2 días)
+      ayer.setDate(hoy.getDate() - 2);
+    } else {
+      ayer.setDate(hoy.getDate() - 1);
+    }
   }
   return ayer.toISOString().split('T')[0];
 }
