@@ -1338,9 +1338,7 @@ async function renderModalAudios(act, cat) {
     const fechaAuditar = getFechaVentas();
     const fechaTxt = new Date(fechaAuditar + 'T12:00:00').toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' });
     
-    const agentesPresentes = agentesActivos.filter(a => agentesPresentesIds.includes(a.id));
-    
-    // Obtener nombres del supervisor (variantes)
+    // Obtener nombres del supervisor
     const mapeo = await getMapeoSupervisor();
     const nombresSupervisor = [currentSupervisor.nombre];
     mapeo.forEach(m => {
@@ -1350,15 +1348,470 @@ async function renderModalAudios(act, cat) {
     });
     const nombresUpper = nombresSupervisor.map(n => n.toUpperCase());
     
-    // 1. Cargar llamadas seleccionadas del CSV
+    // 1. Cargar llamadas seleccionadas (normales + cuelga rápido)
     const { data: llamadasRaw } = await sb.from('tipificacion_diaria')
       .select('*')
       .eq('fecha_cc', fechaAuditar)
-      .eq('fue_seleccionado_audio', true);
+      .or('fue_seleccionado_audio.eq.true,fue_seleccionado_cuelga.eq.true');
     
     const llamadas = (llamadasRaw || []).filter(l => 
       l.supervisor_nombre && nombresUpper.includes(l.supervisor_nombre.trim().toUpperCase())
-    ).sort((a, b) => (a.agente_nombre || '').localeCompare(b.agente_nombre || ''));
+    );
+    
+    const llamadasNormales = llamadas.filter(l => l.fue_seleccionado_audio);
+    const llamadasCuelga = llamadas.filter(l => l.fue_seleccionado_cuelga);
+    
+    // 2. Auditorías ya capturadas
+    const { data: audsHoy } = await sb.from('auditoria_audios').select('*').eq('bitacora_actividad_id', act.id);
+    const audsMap = {};
+    (audsHoy || []).forEach(a => { 
+      if (a.tipificacion_id) audsMap[a.tipificacion_id] = a; 
+    });
+    
+    // 3. Compromisos pendientes de áreas de oportunidad
+    const hoyLocal = getFechaLocal(new Date());
+    const { data: compromisosPendientes } = await sb.from('auditoria_audios')
+      .select('*')
+      .eq('supervisor_id', currentSupervisor.id)
+      .eq('tipificacion', 'AREAS_OPORTUNIDAD')
+      .is('compromiso_cumplido', null)
+      .lte('fecha_verificacion', hoyLocal)
+      .order('fecha_verificacion');
+    
+    // 4. Cuota objetivo
+    const totalLlamadas = llamadasNormales.length + llamadasCuelga.length;
+    if (act.cantidad_objetivo !== totalLlamadas) {
+      await sb.from('bitacora_actividad').update({ cantidad_objetivo: totalLlamadas }).eq('id', act.id);
+    }
+    
+    if (totalLlamadas === 0 && (!compromisosPendientes || compromisosPendientes.length === 0)) {
+      document.getElementById('modal-body').innerHTML = `
+        <div style="text-align:center; padding:40px;">
+          <h3 style="font-size:16px; margin-bottom:8px;">Sin llamadas asignadas</h3>
+          <p style="font-size:13px; color:rgba(255,255,255,0.6);">El coordinador aún no ha cargado el reporte del ${fechaTxt}.</p>
+        </div>`;
+      return;
+    }
+    
+    // Identificar agentes que SOLO tienen llamadas cuelga (alerta)
+    const agentesConNormales = new Set(llamadasNormales.map(l => l.agente_nombre));
+    const agentesConCuelga = new Set(llamadasCuelga.map(l => l.agente_nombre));
+    const agentesSoloCuelga = [...agentesConCuelga].filter(a => !agentesConNormales.has(a));
+    
+    // Stats
+    const total = totalLlamadas;
+    const capturados = llamadas.filter(l => audsMap[l.id]).length;
+    const pendientes = total - capturados;
+    const correctas = (audsHoy || []).filter(a => a.tipificacion === 'CORRECTA').length;
+    const oportunidades = (audsHoy || []).filter(a => a.tipificacion === 'AREAS_OPORTUNIDAD').length;
+    const malas = (audsHoy || []).filter(a => a.tipificacion === 'MALA_LLAMADA' || a.tipificacion === 'CUELGA_RAPIDO').length;
+    
+    // Agrupar normales por agente
+    const porAgenteNormal = {};
+    llamadasNormales.forEach(l => {
+      if (!porAgenteNormal[l.agente_nombre]) porAgenteNormal[l.agente_nombre] = [];
+      porAgenteNormal[l.agente_nombre].push(l);
+    });
+    
+    // Agrupar cuelga por agente
+    const porAgenteCuelga = {};
+    llamadasCuelga.forEach(l => {
+      if (!porAgenteCuelga[l.agente_nombre]) porAgenteCuelga[l.agente_nombre] = [];
+      porAgenteCuelga[l.agente_nombre].push(l);
+    });
+    
+    // BLOQUE 1: Compromisos pendientes
+    let compromisosHTML = '';
+    if (compromisosPendientes && compromisosPendientes.length > 0) {
+      compromisosHTML = `
+        <div style="background:rgba(245,158,11,0.06); border:1px solid rgba(245,158,11,0.4); border-radius:12px; padding:14px; margin-bottom:16px;">
+          <p style="font-size:13px; font-weight:700; margin-bottom:10px; color:#fbbf24; text-transform:uppercase; letter-spacing:1px;">🔄 Compromisos pendientes (${compromisosPendientes.length})</p>
+          ${compromisosPendientes.map(c => `
+            <div style="background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:10px; padding:12px; margin-bottom:8px;">
+              <div style="font-weight:600; font-size:14px; margin-bottom:4px;">👤 ${c.agente_nombre}</div>
+              <div style="font-size:12px; color:rgba(255,255,255,0.6); margin-bottom:6px;">📞 ${c.dn_telefono || '—'} · ${new Date(c.created_at).toLocaleDateString('es-MX', {day:'2-digit', month:'short'})}</div>
+              <div style="font-size:13px; padding:8px; background:rgba(0,0,0,0.2); border-radius:6px; margin-bottom:8px;">📝 ${c.compromiso}</div>
+              <div style="display:flex; gap:8px;">
+                <button class="btn btn-success" style="flex:1; font-size:12px; padding:8px;" onclick="evaluarCompromiso('${c.id}', true, '${act.id}')">✅ Cumplido</button>
+                <button class="btn btn-danger" style="flex:1; font-size:12px; padding:8px;" onclick="evaluarCompromiso('${c.id}', false, '${act.id}')">❌ No cumplido</button>
+              </div>
+            </div>
+          `).join('')}
+        </div>`;
+    }
+    
+    // BLOQUE 2: Llamadas NORMALES por agente
+    let normalesHTML = '';
+    if (llamadasNormales.length > 0) {
+      normalesHTML = `
+        <div style="margin-bottom:18px;">
+          <p style="font-size:12px; font-weight:700; color:rgba(255,255,255,0.7); text-transform:uppercase; letter-spacing:1px; margin-bottom:10px;">🎧 Llamadas normales (CONTACTO)</p>
+      `;
+      for (const agente in porAgenteNormal) {
+        const lista = porAgenteNormal[agente];
+        const capturadosDeEste = lista.filter(l => audsMap[l.id]).length;
+        normalesHTML += `
+          <div style="margin-bottom:14px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; padding-bottom:4px; border-bottom:1px solid rgba(255,255,255,0.06);">
+              <p style="font-size:13px; font-weight:600; color:rgba(255,255,255,0.85);">👤 ${agente}</p>
+              <span style="font-size:11px; color:rgba(255,255,255,0.6);">${capturadosDeEste}/${lista.length}</span>
+            </div>
+            ${lista.map(l => renderTarjetaLlamadaAudio(l, audsMap[l.id], act.id, 'NORMAL')).join('')}
+          </div>`;
+      }
+      normalesHTML += '</div>';
+    }
+    
+    // BLOQUE 3: Llamadas CUELGA RÁPIDO por agente
+    let cuelgaHTML = '';
+    if (llamadasCuelga.length > 0) {
+      cuelgaHTML = `
+        <div style="background:rgba(239,68,68,0.04); border:1px solid rgba(239,68,68,0.25); border-radius:12px; padding:14px; margin-bottom:16px;">
+          <p style="font-size:12px; font-weight:700; color:#fca5a5; text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">⚡ Llamadas cuelga rápido</p>
+          <p style="font-size:11px; color:rgba(255,255,255,0.6); margin-bottom:10px;">Llamadas donde el agente colgó rápidamente. Si no debió colgar → aplicar sanción (escalamiento separado de mala llamada).</p>
+      `;
+      for (const agente in porAgenteCuelga) {
+        const lista = porAgenteCuelga[agente];
+        const capturadosDeEste = lista.filter(l => audsMap[l.id]).length;
+        const esSoloCuelga = agentesSoloCuelga.includes(agente);
+        
+        cuelgaHTML += `
+          <div style="margin-bottom:14px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; padding-bottom:4px; border-bottom:1px solid rgba(255,255,255,0.06);">
+              <p style="font-size:13px; font-weight:600; color:rgba(255,255,255,0.85);">
+                👤 ${agente}
+                ${esSoloCuelga ? '<span style="background:rgba(239,68,68,0.25); color:#fca5a5; padding:2px 6px; border-radius:4px; font-size:10px; margin-left:6px;">🚨 SIN LLAMADAS DE DURACIÓN</span>' : ''}
+              </p>
+              <span style="font-size:11px; color:rgba(255,255,255,0.6);">${capturadosDeEste}/${lista.length}</span>
+            </div>
+            ${lista.map(l => renderTarjetaLlamadaAudio(l, audsMap[l.id], act.id, 'CUELGA_RAPIDO')).join('')}
+          </div>`;
+      }
+      cuelgaHTML += '</div>';
+    }
+    
+    document.getElementById('modal-body').innerHTML = `
+      <div style="background:rgba(0,168,225,0.08); border:1px solid rgba(0,168,225,0.3); border-radius:10px; padding:14px; margin-bottom:16px;">
+        <p style="font-size:12px; color:rgba(255,255,255,0.7); margin-bottom:8px; text-transform:uppercase; letter-spacing:1px;">Llamadas del ${fechaTxt}</p>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(75px, 1fr)); gap:6px;">
+          <div style="background:rgba(255,255,255,0.05); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700;">${total}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">TOTAL</div></div>
+          <div style="background:rgba(255,255,255,0.05); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#fbbf24;">${pendientes}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">PEND.</div></div>
+          <div style="background:rgba(16,185,129,0.1); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#6ee7b7;">${correctas}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">CORRECT.</div></div>
+          <div style="background:rgba(245,158,11,0.1); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#fbbf24;">${oportunidades}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">OPORT.</div></div>
+          <div style="background:rgba(239,68,68,0.1); padding:8px; border-radius:6px; text-align:center;"><div style="font-size:18px; font-weight:700; color:#fca5a5;">${malas}</div><div style="font-size:10px; color:rgba(255,255,255,0.6);">MALAS</div></div>
+        </div>
+      </div>
+      
+      ${compromisosHTML}
+      
+      <div style="max-height:600px; overflow-y:auto;">
+        ${normalesHTML}
+        ${cuelgaHTML}
+      </div>
+    `;
+  } catch (err) {
+    console.error(err);
+    document.getElementById('modal-body').innerHTML = `<div class="error-msg show">Error: ${err.message}</div>`;
+  }
+}
+
+function renderTarjetaLlamadaAudio(llamada, aud, actId, tipoAudit) {
+  let badge = '<span style="background:rgba(255,255,255,0.1); color:rgba(255,255,255,0.6); padding:3px 8px; border-radius:6px; font-size:11px;">⏳ PENDIENTE</span>';
+  let cardClass = 'background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1);';
+  
+  if (aud) {
+    if (aud.tipificacion === 'CORRECTA') {
+      badge = '<span style="background:rgba(16,185,129,0.2); color:#6ee7b7; padding:3px 8px; border-radius:6px; font-size:11px;">✅ Correcta</span>';
+      cardClass = 'background: rgba(16,185,129,0.06); border: 1px solid rgba(16,185,129,0.3);';
+    } else if (aud.tipificacion === 'AREAS_OPORTUNIDAD') {
+      badge = '<span style="background:rgba(245,158,11,0.2); color:#fbbf24; padding:3px 8px; border-radius:6px; font-size:11px;">⚠️ Oportunidad</span>';
+      cardClass = 'background: rgba(245,158,11,0.06); border: 1px solid rgba(245,158,11,0.3);';
+    } else if (aud.tipificacion === 'MALA_LLAMADA' || aud.tipificacion === 'CUELGA_RAPIDO') {
+      const col = NIVEL_COLORES[aud.accion_tomada] || NIVEL_COLORES.RETROALIMENTACION;
+      badge = `<span style="background:${col.bg}; color:${col.text}; padding:3px 8px; border-radius:6px; font-size:11px;">${col.icon} ${NIVEL_NOMBRES[aud.accion_tomada] || 'Sancionado'}</span>`;
+      cardClass = `background: ${col.bg}; border: 1px solid ${col.text};`;
+    }
+  }
+  
+  const minutos = Math.floor((llamada.duracion_cc || 0) / 60);
+  const segundos = (llamada.duracion_cc || 0) % 60;
+  const duracionTxt = `${minutos}:${segundos.toString().padStart(2, '0')}`;
+  
+  // Para cuelga rápido, mostrar también el ACW
+  const acwInfo = tipoAudit === 'CUELGA_RAPIDO' && llamada.acw_cc ? ` · ACW: ${llamada.acw_cc}s` : '';
+  const colgoInfo = tipoAudit === 'CUELGA_RAPIDO' ? ` · 📞 colgó` : '';
+  
+  return `
+    <div style="${cardClass} border-radius: 8px; padding: 10px 12px; margin-bottom: 6px;">
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px; margin-bottom:4px;">
+        <div style="flex:1;">
+          <div style="font-weight:600; font-size:13px;">${llamada.cliente_nombre || llamada.dn || '👤 Cliente sin nombre'}</div>
+          <div style="font-size:11px; color:rgba(255,255,255,0.6);">📞 ${llamada.telefono_marcado || llamada.dn} · ⏱️ ${duracionTxt}${acwInfo}${colgoInfo}</div>
+          <div style="font-size:10px; color:rgba(255,255,255,0.5); margin-top:2px;">${llamada.plan_actual || ''} · ${llamada.calificacion_cc || ''}</div>
+        </div>
+        ${badge}
+      </div>
+      <button class="btn btn-secondary" style="width:100%; margin-top:6px; font-size:11px; padding:6px;" onclick="abrirCapturaAudio('${actId}', '${llamada.id}', '${tipoAudit}')">${aud ? '✏️ Editar' : '📝 Capturar tipificación'}</button>
+    </div>`;
+}
+
+// ============================================================================
+// SUB-MODAL: capturar tipificación de una llamada
+// ============================================================================
+let capturaAudioContext = null;
+
+async function abrirCapturaAudio(actId, llamadaId, tipoAudit) {
+  const { data: llamada } = await sb.from('tipificacion_diaria').select('*').eq('id', llamadaId).single();
+  const { data: aud } = await sb.from('auditoria_audios').select('*').eq('bitacora_actividad_id', actId).eq('tipificacion_id', llamadaId).maybeSingle();
+  const { data: agente } = await sb.from('agentes').select('id').eq('nombre', llamada.agente_nombre).maybeSingle();
+  
+  capturaAudioContext = {
+    actId, llamadaId, llamada, aud: aud || {}, agente_id: agente?.id || null, tipoAudit: tipoAudit || 'NORMAL'
+  };
+  
+  await renderCapturaAudioModal();
+}
+
+async function renderCapturaAudioModal() {
+  const ctx = capturaAudioContext;
+  const { llamada, aud, tipoAudit } = ctx;
+  
+  const minutos = Math.floor((llamada.duracion_cc || 0) / 60);
+  const segundos = (llamada.duracion_cc || 0) % 60;
+  const duracionTxt = `${minutos}:${segundos.toString().padStart(2, '0')}`;
+  
+  // Cargar histórico del agente
+  let antecedentesHTML = '';
+  if (ctx.agente_id) {
+    const { data: historial } = await sb.from('auditoria_audios')
+      .select('tipificacion, accion_tomada, compromiso_cumplido, tipo_audit, created_at')
+      .eq('agente_id', ctx.agente_id)
+      .order('created_at', { ascending: false });
+    
+    const totalMalas = (historial || []).filter(h => 
+      h.tipo_audit !== 'CUELGA_RAPIDO' && (h.tipificacion === 'MALA_LLAMADA' || (h.tipificacion === 'AREAS_OPORTUNIDAD' && h.compromiso_cumplido === false))
+    ).length;
+    const totalCuelga = (historial || []).filter(h => h.tipo_audit === 'CUELGA_RAPIDO' && h.accion_tomada).length;
+    
+    if (totalMalas > 0 || totalCuelga > 0) {
+      antecedentesHTML = `<div style="background:rgba(245,158,11,0.1); border:1px solid rgba(245,158,11,0.3); border-radius:8px; padding:8px 10px; margin-bottom:12px; font-size:12px; color:#fbbf24;">⚠️ Antecedentes: ${totalMalas} mala(s) audio · ${totalCuelga} cuelga rápido</div>`;
+    }
+  }
+  
+  // Banner especial si es cuelga rápido
+  const bannerCuelga = tipoAudit === 'CUELGA_RAPIDO' ? `
+    <div style="background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.4); border-radius:10px; padding:12px; margin-bottom:12px;">
+      <p style="font-size:13px; font-weight:600; color:#fca5a5; margin-bottom:4px;">⚡ Llamada cuelga rápido</p>
+      <p style="font-size:11px; color:rgba(255,255,255,0.7);">El agente colgó rápidamente (duración &lt; 10 seg, ACW alto). Si justifica que no debió colgar → aplica sanción (contador separado de mala llamada).</p>
+    </div>
+  ` : '';
+  
+  // Opciones de tipificación según tipo de auditoría
+  const opcionesTipif = tipoAudit === 'CUELGA_RAPIDO' ? `
+    <option value="CORRECTA" ${aud.tipificacion === 'CORRECTA' ? 'selected' : ''}>✅ OK - sí debió colgar (cliente irrelevante, equivocado, etc.)</option>
+    <option value="CUELGA_RAPIDO" ${aud.tipificacion === 'CUELGA_RAPIDO' ? 'selected' : ''}>🚨 NO debió colgar (perdió oportunidad de venta)</option>
+  ` : `
+    <option value="CORRECTA" ${aud.tipificacion === 'CORRECTA' ? 'selected' : ''}>✅ Llamada correcta</option>
+    <option value="AREAS_OPORTUNIDAD" ${aud.tipificacion === 'AREAS_OPORTUNIDAD' ? 'selected' : ''}>⚠️ Áreas de oportunidad</option>
+    <option value="MALA_LLAMADA" ${aud.tipificacion === 'MALA_LLAMADA' ? 'selected' : ''}>🚨 Mala llamada</option>
+  `;
+  
+  document.getElementById('modal-body').innerHTML = `
+    <div style="background:rgba(0,168,225,0.08); border:1px solid rgba(0,168,225,0.3); border-radius:10px; padding:12px; margin-bottom:16px;">
+      <div style="font-weight:600; font-size:14px;">${llamada.cliente_nombre || '👤 Cliente sin nombre'}</div>
+      <div style="font-size:12px; color:rgba(255,255,255,0.7);">📞 Marcado: ${llamada.telefono_marcado || llamada.dn} · ⏱️ ${duracionTxt}${tipoAudit === 'CUELGA_RAPIDO' && llamada.acw_cc ? ' · ACW: ' + llamada.acw_cc + 's' : ''}</div>
+      <div style="font-size:11px; color:rgba(255,255,255,0.5); margin-top:4px;">Agente: ${llamada.agente_nombre} · ${llamada.plan_actual || ''}</div>
+      <div style="font-size:11px; color:rgba(255,255,255,0.5);">Calificación CC: ${llamada.calificacion_cc || '—'}</div>
+    </div>
+    
+    ${bannerCuelga}
+    ${antecedentesHTML}
+    
+    <div class="form-group">
+      <label>Tipificación de la llamada</label>
+      <select id="aud-tipificacion-call" onchange="onCambioTipAudio()">
+        <option value="">-- Selecciona --</option>
+        ${opcionesTipif}
+      </select>
+    </div>
+    
+    <div class="form-group">
+      <label>Hallazgos / observaciones</label>
+      <textarea id="aud-hallazgos-call" rows="2" placeholder="Qué encontraste...">${aud.hallazgos || ''}</textarea>
+    </div>
+    
+    <div id="aud-compromiso-block-call" style="display:none;">
+      <div style="background:rgba(245,158,11,0.06); border:1px solid rgba(245,158,11,0.3); border-radius:8px; padding:12px; margin-bottom:12px;">
+        <p style="font-size:13px; font-weight:600; margin-bottom:8px; color:#fbbf24;">⚠️ Compromiso para mejora</p>
+        <div class="form-group" style="margin-bottom:8px;">
+          <label>Compromiso del agente</label>
+          <textarea id="aud-compromiso-call" rows="2" placeholder="Qué se compromete a mejorar...">${aud.compromiso || ''}</textarea>
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+          <label>📅 Fecha para verificar</label>
+          <input type="date" id="aud-fecha-verif-call" value="${aud.fecha_verificacion || ''}" min="${getFechaLocal(new Date())}">
+        </div>
+      </div>
+    </div>
+    
+    <div id="aud-mala-block-call" style="display:none;">
+      <div id="aud-sancion-info-call"></div>
+    </div>
+  `;
+  
+  document.getElementById('modal-actions').innerHTML = `
+    <button class="btn btn-secondary" onclick="renderModalAudios(currentEditActividad.act, currentEditActividad.cat)">← Volver</button>
+    <button class="btn btn-success" onclick="guardarCapturaAudio()">💾 Guardar</button>
+  `;
+  
+  setTimeout(() => {
+    const fechaInput = document.getElementById('aud-fecha-verif-call');
+    if (fechaInput && !fechaInput.value) {
+      const manana = new Date();
+      manana.setDate(manana.getDate() + 1);
+      fechaInput.value = getFechaLocal(manana);
+    }
+  }, 100);
+  
+  await onCambioTipAudio();
+}
+
+async function onCambioTipAudio() {
+  const tip = document.getElementById('aud-tipificacion-call')?.value;
+  const tipoAudit = capturaAudioContext.tipoAudit;
+  const compromisoBlock = document.getElementById('aud-compromiso-block-call');
+  const malaBlock = document.getElementById('aud-mala-block-call');
+  const sancionInfo = document.getElementById('aud-sancion-info-call');
+  
+  if (compromisoBlock) compromisoBlock.style.display = tip === 'AREAS_OPORTUNIDAD' ? 'block' : 'none';
+  if (malaBlock) malaBlock.style.display = (tip === 'MALA_LLAMADA' || tip === 'CUELGA_RAPIDO') ? 'block' : 'none';
+  
+  if ((tip === 'MALA_LLAMADA' || tip === 'CUELGA_RAPIDO') && capturaAudioContext.agente_id) {
+    const hoyLocal = getFechaLocal(new Date());
+    const tipoBuscar = tip === 'CUELGA_RAPIDO' ? 'CUELGA_RAPIDO' : 'NORMAL';
+    
+    const { data: todasFallasA } = await sb.from('auditoria_audios')
+      .select('accion_tomada, created_at, tipo_audit, tipificacion')
+      .eq('agente_id', capturaAudioContext.agente_id)
+      .eq('tipo_audit', tipoBuscar)
+      .not('accion_tomada', 'is', null);
+    const yaHoy = (todasFallasA || []).find(f => getFechaLocal(new Date(f.created_at)) === hoyLocal);
+    
+    if (yaHoy) {
+      sancionInfo.innerHTML = `
+        <div style="background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.15); border-radius:8px; padding:14px; margin-bottom:12px;">
+          <p style="font-size:13px; font-weight:700; color:rgba(255,255,255,0.8); margin-bottom:6px;">📋 Falla registrada (sin sanción adicional)</p>
+          <p style="font-size:12px; color:rgba(255,255,255,0.7);">Hoy ya recibió <strong>${NIVEL_NOMBRES[yaHoy.accion_tomada]}</strong> en este tipo. Se registra pero NO se aplica nueva sanción.</p>
+        </div>`;
+    } else {
+      const rpcName = tip === 'CUELGA_RAPIDO' ? 'obtener_siguiente_sancion_cuelga' : 'obtener_siguiente_sancion';
+      const { data: result } = await sb.rpc(rpcName, { p_agente_id: capturaAudioContext.agente_id });
+      const sancion = result?.[0];
+      if (sancion) {
+        const col = NIVEL_COLORES[sancion.siguiente_accion];
+        const tipoTxt = tip === 'CUELGA_RAPIDO' ? 'cuelga rápido' : 'malas llamadas';
+        const numField = sancion.num_dia_falla || sancion.num_mala_llamada || sancion.num_falla;
+        sancionInfo.innerHTML = `
+          <div style="background:${col.bg}; border:1px solid ${col.text}; border-radius:8px; padding:14px; margin-bottom:12px;">
+            <p style="font-size:13px; font-weight:700; color:${col.text}; margin-bottom:6px;">${col.icon} Sanción: ${NIVEL_NOMBRES[sancion.siguiente_accion]}</p>
+            <p style="font-size:12px; color:rgba(255,255,255,0.8);">Sería el <strong>${numField}er día</strong> con ${tipoTxt}.</p>
+            ${sancion.requiere_autorizacion ? `
+              <div style="margin-top:10px; padding:10px; background:rgba(0,0,0,0.3); border-radius:6px;">
+                <p style="font-size:12px; color:#fca5a5; font-weight:600;">🔒 REQUIERE AUTORIZACIÓN DEL COORDINADOR</p>
+              </div>
+            ` : ''}
+          </div>`;
+      }
+    }
+  }
+}
+
+async function guardarCapturaAudio() {
+  const ctx = capturaAudioContext;
+  const tipificacion = document.getElementById('aud-tipificacion-call').value;
+  const hallazgos = document.getElementById('aud-hallazgos-call').value.trim();
+  
+  if (!tipificacion) { alert('Selecciona la tipificación'); return; }
+  if (!hallazgos) { alert('Captura los hallazgos'); return; }
+  
+  const payload = {
+    bitacora_actividad_id: ctx.actId,
+    supervisor_id: currentSupervisor.id,
+    tipificacion_id: ctx.llamadaId,
+    agente_id: ctx.agente_id,
+    agente_nombre: ctx.llamada.agente_nombre,
+    dn_telefono: ctx.llamada.telefono_marcado || ctx.llamada.dn,
+    cliente_nombre: ctx.llamada.cliente_nombre,
+    duracion_segundos: ctx.llamada.duracion_cc,
+    fecha_llamada: ctx.llamada.fecha_cc,
+    hallazgos: hallazgos,
+    tipificacion: tipificacion,
+    tipo_audit: ctx.tipoAudit,
+    estado: 'ACTIVA'
+  };
+  
+  if (tipificacion === 'AREAS_OPORTUNIDAD') {
+    const compromiso = document.getElementById('aud-compromiso-call').value.trim();
+    const fechaVerif = document.getElementById('aud-fecha-verif-call').value;
+    if (!compromiso) { alert('Captura el compromiso'); return; }
+    if (!fechaVerif) { alert('Selecciona la fecha de verificación'); return; }
+    payload.compromiso = compromiso;
+    payload.fecha_verificacion = fechaVerif;
+  }
+  
+  if ((tipificacion === 'MALA_LLAMADA' || tipificacion === 'CUELGA_RAPIDO') && ctx.agente_id) {
+    const hoyLocal = getFechaLocal(new Date());
+    const tipoBuscar = tipificacion === 'CUELGA_RAPIDO' ? 'CUELGA_RAPIDO' : 'NORMAL';
+    
+    const { data: todasFallasA } = await sb.from('auditoria_audios')
+      .select('accion_tomada, created_at')
+      .eq('agente_id', ctx.agente_id)
+      .eq('tipo_audit', tipoBuscar)
+      .not('accion_tomada', 'is', null);
+    const yaHoy = (todasFallasA || []).find(f => getFechaLocal(new Date(f.created_at)) === hoyLocal);
+    
+    if (yaHoy) {
+      payload.accion_tomada = null;
+      payload.num_mala_llamada = null;
+      payload.requiere_autorizacion = false;
+    } else {
+      const rpcName = tipificacion === 'CUELGA_RAPIDO' ? 'obtener_siguiente_sancion_cuelga' : 'obtener_siguiente_sancion';
+      const { data: result } = await sb.rpc(rpcName, { p_agente_id: ctx.agente_id });
+      const sancion = result?.[0];
+      if (!sancion) { alert('Error calculando sanción'); return; }
+      payload.accion_tomada = sancion.siguiente_accion;
+      payload.num_mala_llamada = sancion.num_dia_falla || sancion.num_mala_llamada;
+      payload.requiere_autorizacion = sancion.requiere_autorizacion;
+      if (sancion.requiere_autorizacion) {
+        if (!confirm(`Esta acción requiere autorización del coordinador. ¿Solicitar autorización para aplicar ${NIVEL_NOMBRES[sancion.siguiente_accion]}?`)) return;
+        payload.estado = 'PENDIENTE_AUTORIZACION';
+      }
+    }
+  }
+  
+  const { data: existing } = await sb.from('auditoria_audios')
+    .select('id').eq('bitacora_actividad_id', ctx.actId).eq('tipificacion_id', ctx.llamadaId).maybeSingle();
+  let error;
+  if (existing) {
+    ({ error } = await sb.from('auditoria_audios').update(payload).eq('id', existing.id));
+  } else {
+    ({ error } = await sb.from('auditoria_audios').insert(payload));
+  }
+  if (error) { alert('Error: ' + error.message); return; }
+  
+  const { count } = await sb.from('auditoria_audios').select('*', { count: 'exact', head: true }).eq('bitacora_actividad_id', ctx.actId);
+  const { data: actUpdated } = await sb.from('bitacora_actividad').select('cantidad_objetivo').eq('id', ctx.actId).single();
+  const total = actUpdated?.cantidad_objetivo || 0;
+  let nuevoEstado = count === 0 ? 'PENDIENTE' : 'PARCIAL';
+  if (count >= total && total > 0) nuevoEstado = 'COMPLETADA';
+  await sb.from('bitacora_actividad').update({
+    cantidad_realizada: count, estado: nuevoEstado,
+    porcentaje_completado: total > 0 ? (count/total)*100 : 0
+  }).eq('id', ctx.actId);
+  
+  await renderModalAudios(currentEditActividad.act, currentEditActividad.cat);
+  await loadActivities();
+}
     
     // 2. Cargar auditorías ya capturadas hoy
     const { data: audsHoy } = await sb.from('auditoria_audios')
@@ -1469,278 +1922,6 @@ async function renderModalAudios(act, cat) {
   }
 }
 
-function renderTarjetaLlamadaAudio(llamada, aud, actId) {
-  let badge = '<span style="background:rgba(255,255,255,0.1); color:rgba(255,255,255,0.6); padding:3px 8px; border-radius:6px; font-size:11px;">⏳ PENDIENTE</span>';
-  let cardClass = 'background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1);';
-  
-  if (aud) {
-    if (aud.tipificacion === 'CORRECTA') {
-      badge = '<span style="background:rgba(16,185,129,0.2); color:#6ee7b7; padding:3px 8px; border-radius:6px; font-size:11px;">✅ Correcta</span>';
-      cardClass = 'background: rgba(16,185,129,0.06); border: 1px solid rgba(16,185,129,0.3);';
-    } else if (aud.tipificacion === 'AREAS_OPORTUNIDAD') {
-      badge = '<span style="background:rgba(245,158,11,0.2); color:#fbbf24; padding:3px 8px; border-radius:6px; font-size:11px;">⚠️ Oportunidad</span>';
-      cardClass = 'background: rgba(245,158,11,0.06); border: 1px solid rgba(245,158,11,0.3);';
-    } else if (aud.tipificacion === 'MALA_LLAMADA') {
-      const col = NIVEL_COLORES[aud.accion_tomada] || NIVEL_COLORES.RETROALIMENTACION;
-      badge = `<span style="background:${col.bg}; color:${col.text}; padding:3px 8px; border-radius:6px; font-size:11px;">${col.icon} ${NIVEL_NOMBRES[aud.accion_tomada] || 'Mala'}</span>`;
-      cardClass = `background: ${col.bg}; border: 1px solid ${col.text};`;
-    }
-  }
-  
-  const minutos = Math.floor((llamada.duracion_cc || 0) / 60);
-  const segundos = (llamada.duracion_cc || 0) % 60;
-  const duracionTxt = `${minutos}:${segundos.toString().padStart(2, '0')}`;
-  
-  return `
-    <div style="${cardClass} border-radius: 8px; padding: 10px 12px; margin-bottom: 6px;">
-      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px; margin-bottom:4px;">
-        <div style="flex:1;">
-          <div style="font-weight:600; font-size:13px;">${llamada.cliente_nombre || '👤 Cliente'}</div>
-          <div style="font-size:11px; color:rgba(255,255,255,0.6);">📞 Marcado: ${llamada.telefono_marcado || llamada.dn} · ⏱️ ${duracionTxt}</div>
-          <div style="font-size:10px; color:rgba(255,255,255,0.5); margin-top:2px;">${llamada.plan_actual || ''}</div>
-        </div>
-        ${badge}
-      </div>
-      <button class="btn btn-secondary" style="width:100%; margin-top:6px; font-size:11px; padding:6px;" onclick="abrirCapturaAudio('${actId}', '${llamada.id}')">${aud ? '✏️ Editar' : '📝 Capturar tipificación'}</button>
-    </div>`;
-}
-
-// ============================================================================
-// SUB-MODAL: capturar tipificación de una llamada
-// ============================================================================
-let capturaAudioContext = null;
-
-async function abrirCapturaAudio(actId, llamadaId) {
-  const { data: llamada } = await sb.from('tipificacion_diaria').select('*').eq('id', llamadaId).single();
-  const { data: aud } = await sb.from('auditoria_audios').select('*').eq('bitacora_actividad_id', actId).eq('tipificacion_id', llamadaId).maybeSingle();
-  const { data: agente } = await sb.from('agentes').select('id').eq('nombre', llamada.agente_nombre).maybeSingle();
-  
-  capturaAudioContext = {
-    actId, llamadaId, llamada, aud: aud || {}, agente_id: agente?.id || null
-  };
-  
-  await renderCapturaAudioModal();
-}
-
-async function renderCapturaAudioModal() {
-  const ctx = capturaAudioContext;
-  const { llamada, aud } = ctx;
-  
-  const minutos = Math.floor((llamada.duracion_cc || 0) / 60);
-  const segundos = (llamada.duracion_cc || 0) % 60;
-  const duracionTxt = `${minutos}:${segundos.toString().padStart(2, '0')}`;
-  
-  // Cargar histórico del agente para preview
-  let antecedentesHTML = '';
-  if (ctx.agente_id) {
-    const { data: historial } = await sb.from('auditoria_audios')
-      .select('tipificacion, accion_tomada, compromiso_cumplido, created_at')
-      .eq('agente_id', ctx.agente_id)
-      .order('created_at', { ascending: false });
-    
-    const totalMalas = (historial || []).filter(h => 
-      h.tipificacion === 'MALA_LLAMADA' || 
-      (h.tipificacion === 'AREAS_OPORTUNIDAD' && h.compromiso_cumplido === false)
-    ).length;
-    const ultimaSancion = (historial || []).find(h => h.accion_tomada);
-    
-    if (totalMalas > 0) {
-      antecedentesHTML = `<div style="background:rgba(245,158,11,0.1); border:1px solid rgba(245,158,11,0.3); border-radius:8px; padding:8px 10px; margin-bottom:12px; font-size:12px; color:#fbbf24;">⚠️ Antecedentes: ${totalMalas} mala(s) · Última sanción: ${ultimaSancion ? NIVEL_NOMBRES[ultimaSancion.accion_tomada] : '—'}</div>`;
-    }
-  }
-  
-  document.getElementById('modal-body').innerHTML = `
-    <div style="background:rgba(0,168,225,0.08); border:1px solid rgba(0,168,225,0.3); border-radius:10px; padding:12px; margin-bottom:16px;">
-      <div style="font-weight:600; font-size:14px;">${llamada.cliente_nombre || '👤 Cliente'}</div>
-      <div style="font-size:12px; color:rgba(255,255,255,0.7);">📞 Marcado: ${llamada.telefono_marcado || llamada.dn} · ⏱️ ${duracionTxt}</div>
-      <div style="font-size:11px; color:rgba(255,255,255,0.5); margin-top:4px;">Agente: ${llamada.agente_nombre} · ${llamada.plan_actual || ''}</div>
-      ${llamada.grabacion_cc ? `<div style="font-size:11px; color:#7dd3fc; margin-top:4px;">🎧 Grabación: ${llamada.grabacion_cc}</div>` : ''}
-    </div>
-    
-    ${antecedentesHTML}
-    
-    <div class="form-group">
-      <label>Tipificación de la llamada</label>
-      <select id="aud-tipificacion-call" onchange="onCambioTipAudio()">
-        <option value="">-- Selecciona --</option>
-        <option value="CORRECTA" ${aud.tipificacion === 'CORRECTA' ? 'selected' : ''}>✅ Llamada correcta</option>
-        <option value="AREAS_OPORTUNIDAD" ${aud.tipificacion === 'AREAS_OPORTUNIDAD' ? 'selected' : ''}>⚠️ Áreas de oportunidad</option>
-        <option value="MALA_LLAMADA" ${aud.tipificacion === 'MALA_LLAMADA' ? 'selected' : ''}>🚨 Mala llamada</option>
-      </select>
-    </div>
-    
-    <div class="form-group">
-      <label>Hallazgos / observaciones</label>
-      <textarea id="aud-hallazgos-call" rows="2" placeholder="Qué encontraste en la llamada...">${aud.hallazgos || ''}</textarea>
-    </div>
-    
-    <div id="aud-compromiso-block-call" style="display:none;">
-      <div style="background:rgba(245,158,11,0.06); border:1px solid rgba(245,158,11,0.3); border-radius:8px; padding:12px; margin-bottom:12px;">
-        <p style="font-size:13px; font-weight:600; margin-bottom:8px; color:#fbbf24;">⚠️ Compromiso para mejora</p>
-        <div class="form-group" style="margin-bottom:8px;">
-          <label>Compromiso del agente</label>
-          <textarea id="aud-compromiso-call" rows="2" placeholder="Qué se compromete a mejorar...">${aud.compromiso || ''}</textarea>
-        </div>
-        <div class="form-group" style="margin-bottom:0;">
-          <label>📅 Fecha para verificar</label>
-          <input type="date" id="aud-fecha-verif-call" value="${aud.fecha_verificacion || ''}" min="${getFechaLocal(new Date())}">
-        </div>
-      </div>
-    </div>
-    
-    <div id="aud-mala-block-call" style="display:none;">
-      <div id="aud-sancion-info-call"></div>
-    </div>
-  `;
-  
-  document.getElementById('modal-actions').innerHTML = `
-    <button class="btn btn-secondary" onclick="renderModalAudios(currentEditActividad.act, currentEditActividad.cat)">← Volver</button>
-    <button class="btn btn-success" onclick="guardarCapturaAudio()">💾 Guardar</button>
-  `;
-  
-  // Default fecha
-  setTimeout(() => {
-    const fechaInput = document.getElementById('aud-fecha-verif-call');
-    if (fechaInput && !fechaInput.value) {
-      const manana = new Date();
-      manana.setDate(manana.getDate() + 1);
-      fechaInput.value = getFechaLocal(manana);
-    }
-  }, 100);
-  
-  await onCambioTipAudio();
-}
-
-async function onCambioTipAudio() {
-  const tip = document.getElementById('aud-tipificacion-call')?.value;
-  const compromisoBlock = document.getElementById('aud-compromiso-block-call');
-  const malaBlock = document.getElementById('aud-mala-block-call');
-  const sancionInfo = document.getElementById('aud-sancion-info-call');
-  
-  if (compromisoBlock) compromisoBlock.style.display = tip === 'AREAS_OPORTUNIDAD' ? 'block' : 'none';
-  if (malaBlock) malaBlock.style.display = tip === 'MALA_LLAMADA' ? 'block' : 'none';
-  
-  if (tip === 'MALA_LLAMADA' && capturaAudioContext.agente_id) {
-    // Verificar si ya tuvo sanción hoy
-    const hoyLocal = getFechaLocal(new Date());
-    const { data: todasFallasA } = await sb.from('auditoria_audios')
-      .select('accion_tomada, created_at')
-      .eq('agente_id', capturaAudioContext.agente_id)
-      .eq('tipificacion', 'MALA_LLAMADA')
-      .not('accion_tomada', 'is', null);
-    const yaHoy = (todasFallasA || []).find(f => getFechaLocal(new Date(f.created_at)) === hoyLocal);
-    
-    if (yaHoy) {
-      sancionInfo.innerHTML = `
-        <div style="background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.15); border-radius:8px; padding:14px; margin-bottom:12px;">
-          <p style="font-size:13px; font-weight:700; color:rgba(255,255,255,0.8); margin-bottom:6px;">📋 Falla registrada (sin sanción adicional)</p>
-          <p style="font-size:12px; color:rgba(255,255,255,0.7);">Hoy ya recibió <strong>${NIVEL_NOMBRES[yaHoy.accion_tomada]}</strong>. Se registra pero NO se aplica nueva sanción.</p>
-        </div>`;
-    } else {
-      const { data: result } = await sb.rpc('obtener_siguiente_sancion', { p_agente_id: capturaAudioContext.agente_id });
-      const sancion = result?.[0];
-      if (sancion) {
-        const col = NIVEL_COLORES[sancion.siguiente_accion];
-        sancionInfo.innerHTML = `
-          <div style="background:${col.bg}; border:1px solid ${col.text}; border-radius:8px; padding:14px; margin-bottom:12px;">
-            <p style="font-size:13px; font-weight:700; color:${col.text}; margin-bottom:6px;">${col.icon} Sanción: ${NIVEL_NOMBRES[sancion.siguiente_accion]}</p>
-            <p style="font-size:12px; color:rgba(255,255,255,0.8);">Sería el <strong>${sancion.num_mala_llamada}er día</strong> con malas llamadas.</p>
-            ${sancion.requiere_autorizacion ? `
-              <div style="margin-top:10px; padding:10px; background:rgba(0,0,0,0.3); border-radius:6px;">
-                <p style="font-size:12px; color:#fca5a5; font-weight:600;">🔒 REQUIERE AUTORIZACIÓN DEL COORDINADOR</p>
-              </div>
-            ` : ''}
-          </div>`;
-      }
-    }
-  }
-}
-
-async function guardarCapturaAudio() {
-  const ctx = capturaAudioContext;
-  const tipificacion = document.getElementById('aud-tipificacion-call').value;
-  const hallazgos = document.getElementById('aud-hallazgos-call').value.trim();
-  
-  if (!tipificacion) { alert('Selecciona la tipificación'); return; }
-  if (!hallazgos) { alert('Captura los hallazgos'); return; }
-  
-  const payload = {
-    bitacora_actividad_id: ctx.actId,
-    supervisor_id: currentSupervisor.id,
-    tipificacion_id: ctx.llamadaId,
-    agente_id: ctx.agente_id,
-    agente_nombre: ctx.llamada.agente_nombre,
-    dn_telefono: ctx.llamada.telefono_marcado || ctx.llamada.dn,
-    cliente_nombre: ctx.llamada.cliente_nombre,
-    duracion_segundos: ctx.llamada.duracion_cc,
-    fecha_llamada: ctx.llamada.fecha_cc,
-    hallazgos: hallazgos,
-    tipificacion: tipificacion,
-    estado: 'ACTIVA'
-  };
-  
-  if (tipificacion === 'AREAS_OPORTUNIDAD') {
-    const compromiso = document.getElementById('aud-compromiso-call').value.trim();
-    const fechaVerif = document.getElementById('aud-fecha-verif-call').value;
-    if (!compromiso) { alert('Captura el compromiso'); return; }
-    if (!fechaVerif) { alert('Selecciona la fecha de verificación'); return; }
-    payload.compromiso = compromiso;
-    payload.fecha_verificacion = fechaVerif;
-  }
-  
-  if (tipificacion === 'MALA_LLAMADA' && ctx.agente_id) {
-    // Verificar si HOY ya recibió sanción
-    const hoyLocal = getFechaLocal(new Date());
-    const { data: todasFallasA } = await sb.from('auditoria_audios')
-      .select('accion_tomada, created_at')
-      .eq('agente_id', ctx.agente_id)
-      .eq('tipificacion', 'MALA_LLAMADA')
-      .not('accion_tomada', 'is', null);
-    const yaHoy = (todasFallasA || []).find(f => getFechaLocal(new Date(f.created_at)) === hoyLocal);
-    
-    if (yaHoy) {
-      payload.accion_tomada = null;
-      payload.num_mala_llamada = null;
-      payload.requiere_autorizacion = false;
-    } else {
-      const { data: result } = await sb.rpc('obtener_siguiente_sancion', { p_agente_id: ctx.agente_id });
-      const sancion = result?.[0];
-      if (!sancion) { alert('Error calculando sanción'); return; }
-      payload.accion_tomada = sancion.siguiente_accion;
-      payload.num_mala_llamada = sancion.num_mala_llamada;
-      payload.requiere_autorizacion = sancion.requiere_autorizacion;
-      if (sancion.requiere_autorizacion) {
-        if (!confirm(`Esta acción requiere autorización del coordinador. ¿Solicitar autorización para aplicar ${NIVEL_NOMBRES[sancion.siguiente_accion]}?`)) return;
-        payload.estado = 'PENDIENTE_AUTORIZACION';
-      }
-    }
-  }
-  
-  // Upsert por (bitacora_actividad_id, tipificacion_id)
-  const { data: existing } = await sb.from('auditoria_audios')
-    .select('id').eq('bitacora_actividad_id', ctx.actId).eq('tipificacion_id', ctx.llamadaId).maybeSingle();
-  let error;
-  if (existing) {
-    ({ error } = await sb.from('auditoria_audios').update(payload).eq('id', existing.id));
-  } else {
-    ({ error } = await sb.from('auditoria_audios').insert(payload));
-  }
-  if (error) { alert('Error: ' + error.message); return; }
-  
-  // Actualizar contador
-  const { count } = await sb.from('auditoria_audios').select('*', { count: 'exact', head: true }).eq('bitacora_actividad_id', ctx.actId);
-  const { data: actUpdated } = await sb.from('bitacora_actividad').select('cantidad_objetivo').eq('id', ctx.actId).single();
-  const total = actUpdated?.cantidad_objetivo || 0;
-  let nuevoEstado = count === 0 ? 'PENDIENTE' : 'PARCIAL';
-  if (count >= total && total > 0) nuevoEstado = 'COMPLETADA';
-  await sb.from('bitacora_actividad').update({
-    cantidad_realizada: count, estado: nuevoEstado,
-    porcentaje_completado: total > 0 ? (count/total)*100 : 0
-  }).eq('id', ctx.actId);
-  
-  await renderModalAudios(currentEditActividad.act, currentEditActividad.cat);
-  await loadActivities();
-}
 
 // Evaluar si un compromiso fue cumplido o no
 async function evaluarCompromiso(auditoriaId, cumplido, actIdHoy) {
