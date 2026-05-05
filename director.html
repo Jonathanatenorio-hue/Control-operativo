@@ -791,6 +791,14 @@ function parseCSV(text) {
   return result;
 }
 
+// Normalizar nombre: quitar acentos, Ñ→N, mayúsculas, trim, espacios múltiples
+function normalizarNombre(s) {
+  if (!s) return '';
+  return s.normalize('NFD').replace(/[\u0300-\u036f]/g, '')  // quitar acentos
+    .replace(/Ñ/g, 'N').replace(/ñ/g, 'n')                    // Ñ → N
+    .toUpperCase().trim().replace(/\s+/g, ' ');              // limpiar espacios
+}
+
 // Leer archivo con detección de encoding
 function leerArchivoConEncoding(file) {
   return new Promise((resolve, reject) => {
@@ -893,13 +901,14 @@ async function cargarCsvTipificacion() {
       .select('nombre, supervisor, centro, estatus')
       .eq('estatus', 'ACTIVO');
     
-    // Diccionario: nombre_agente → supervisor (de la plantilla)
+    // Diccionario: nombre_agente NORMALIZADO → supervisor (de la plantilla)
     const agenteSupMap = {};
     (plantilla || []).forEach(p => {
       if (p.nombre && p.supervisor) {
-        agenteSupMap[p.nombre.toUpperCase().trim()] = {
+        agenteSupMap[normalizarNombre(p.nombre)] = {
           supervisor_nombre: p.supervisor.trim(),
-          centro: p.centro
+          centro: p.centro,
+          nombre_oficial: p.nombre.trim()  // guardar el nombre oficial de la plantilla
         };
       }
     });
@@ -949,8 +958,8 @@ async function cargarCsvTipificacion() {
       // Validar nombre del agente
       if (!agenteRaw) { stats.sinAgente++; continue; }
       
-      // Buscar agente en plantilla del informe-semanal
-      const datosAgente = agenteSupMap[agenteRaw.toUpperCase()];
+      // Buscar agente en plantilla del informe-semanal (con normalización)
+      const datosAgente = agenteSupMap[normalizarNombre(agenteRaw)];
       if (!datosAgente) {
         stats.agenteNoEnPlantilla++;
         continue;
@@ -1005,7 +1014,7 @@ async function cargarCsvTipificacion() {
         fecha_renovacion: row[colIdx.fecha_renov] || '',
         plan_actual: planActual,
         ciudad: row[colIdx.ciudad] || '',
-        agente_nombre: (row[colIdx.gestor] || '').trim(),
+        agente_nombre: datosAgente.nombre_oficial,
         estatus_cc: estatus,
         calificacion_cc: calificacion,
         duracion_cc: duracion,
