@@ -732,6 +732,14 @@ function getFechaLocal(date) {
   return `${year}-${month}-${day}`;
 }
 
+// Normalizar nombre: quitar acentos, Ñ→N, mayúsculas, trim, espacios múltiples
+function normalizarNombre(s) {
+  if (!s) return '';
+  return s.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/Ñ/g, 'N').replace(/ñ/g, 'n')
+    .toUpperCase().trim().replace(/\s+/g, ' ');
+}
+
 function getFechaVentas() {
   const hoy = new Date();
   const ayer = new Date(hoy);
@@ -1409,17 +1417,17 @@ async function renderModalAudios(act, cat) {
     (audsHoy || []).forEach(a => { if (a.agente_id) agentesConCaptura.add(a.agente_id); });
     const pendientes = total - agentesConCaptura.size;
     
-    // Agrupar llamadas por agente_nombre para fácil acceso
+    // Agrupar llamadas por agente_nombre para fácil acceso (con normalización)
     const normalesPorAgente = {};
     llamadasNormales.forEach(l => {
-      const key = (l.agente_nombre || '').toUpperCase().trim();
+      const key = normalizarNombre(l.agente_nombre);
       if (!normalesPorAgente[key]) normalesPorAgente[key] = [];
       normalesPorAgente[key].push(l);
     });
     
     const cuelgaPorAgente = {};
     llamadasCuelga.forEach(l => {
-      const key = (l.agente_nombre || '').toUpperCase().trim();
+      const key = normalizarNombre(l.agente_nombre);
       if (!cuelgaPorAgente[key]) cuelgaPorAgente[key] = [];
       cuelgaPorAgente[key].push(l);
     });
@@ -1449,7 +1457,7 @@ async function renderModalAudios(act, cat) {
     
     let agentesHTML = '';
     for (const agente of agentesPresentesHoy) {
-      const nombreUpper = agente.nombre.toUpperCase().trim();
+      const nombreUpper = normalizarNombre(agente.nombre);
       const llamadasNorm = normalesPorAgente[nombreUpper] || [];
       const llamadasCue = cuelgaPorAgente[nombreUpper] || [];
       
