@@ -735,29 +735,59 @@ function logCsv(msg, tipo = '') {
   logAreaCsv.scrollTop = logAreaCsv.scrollHeight;
 }
 
-// Parser CSV simple que maneja comillas dobles
+// Parser CSV robusto que maneja comillas dobles, comas dentro de campos, y saltos de línea en campos
 function parseCSV(text) {
-  const lines = text.split(/\r?\n/);
   const result = [];
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    const row = [];
-    let current = '';
-    let inQuotes = false;
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
+  let row = [];
+  let current = '';
+  let inQuotes = false;
+  
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    
+    if (inQuotes) {
       if (ch === '"') {
-        if (inQuotes && line[i+1] === '"') { current += '"'; i++; }
-        else inQuotes = !inQuotes;
-      } else if (ch === ',' && !inQuotes) {
-        row.push(current); current = '';
+        // Doble comilla escapada "" → comilla literal
+        if (text[i+1] === '"') {
+          current += '"';
+          i++;
+        } else {
+          // Cierre de comilla
+          inQuotes = false;
+        }
+      } else {
+        current += ch;
+      }
+    } else {
+      if (ch === '"') {
+        inQuotes = true;
+      } else if (ch === ',') {
+        row.push(current);
+        current = '';
+      } else if (ch === '\r') {
+        // Skip - lo maneja el \n
+      } else if (ch === '\n') {
+        row.push(current);
+        // Si la fila tiene contenido real, agregarla
+        if (row.length > 1 || (row.length === 1 && row[0].trim() !== '')) {
+          result.push(row);
+        }
+        row = [];
+        current = '';
       } else {
         current += ch;
       }
     }
-    row.push(current);
-    result.push(row);
   }
+  
+  // Última fila si quedó pendiente
+  if (current !== '' || row.length > 0) {
+    row.push(current);
+    if (row.length > 1 || (row.length === 1 && row[0].trim() !== '')) {
+      result.push(row);
+    }
+  }
+  
   return result;
 }
 
@@ -830,6 +860,8 @@ async function cargarCsvTipificacion() {
       calificacion: headers.indexOf('Calificacion_CC'),
       obs: headers.indexOf('Obs_CC'),
       grabacion: headers.indexOf('Grabacion_CC'),
+      colgo_agente: headers.indexOf('Colgo_Agente_CC'),
+      acw: headers.indexOf('ACW'),
       supervisor: headers.indexOf('Clave_Int_Agente')  // este es el SUPERVISOR
     };
     
@@ -857,10 +889,11 @@ async function cargarCsvTipificacion() {
     });
     logCsv(`   ${sups.length} supervisores activos en ${sede}`, 'success');
     
-    // 4. Filtrar registros válidos (para WhatsApp y para Audios)
+    // 4. Filtrar registros válidos (para WhatsApp y Audios normales y Audios cuelga rápido)
     logCsv('4. Filtrando registros candidatos...', 'info');
-    logCsv(`   📱 WhatsApp: NO CONTACTO / AGENDA BUZON + plan no excluido`, '');
-    logCsv(`   🎧 Audios: CONTACTO + duración 180-480 seg`, '');
+    logCsv(`   📱 WhatsApp: NO CONTACTO/AGENDA BUZON + plan no excluido`, '');
+    logCsv(`   🎧 Audios normales: CONTACTO + 120-600 seg + NO VENTA`, '');
+    logCsv(`   ⚡ Audios cuelga rápido: Colgo=SI + ACW>=240 + dur<10 + SIN_CALIF/NO_CONTACTO`, '');
     logCsv(`   Fecha_CC: ${fecha}`, '');
     
     const candidatos = [];
@@ -871,6 +904,7 @@ async function cargarCsvTipificacion() {
       sinSupervisor: 0,
       validosWhatsapp: 0,
       validosAudio: 0,
+      validosCuelga: 0,
       validosCualquiera: 0
     };
     
@@ -882,6 +916,9 @@ async function cargarCsvTipificacion() {
       const estatus = (row[colIdx.estatus] || '').trim();
       const duracionStr = (row[colIdx.duracion] || '').trim();
       const duracion = duracionStr.match(/^\d+$/) ? parseInt(duracionStr) : null;
+      const colgoAgente = (row[colIdx.colgo_agente] || '').trim().toUpperCase();
+      const acwStr = (row[colIdx.acw] || '').trim();
+      const acw = acwStr.match(/^\d+$/) ? parseInt(acwStr) : null;
       
       // Validar fecha
       if (!fechaCcRaw) { stats.sinFecha++; continue; }
@@ -901,13 +938,21 @@ async function cargarCsvTipificacion() {
       const planNoExcluido = !planesExcluidosSet.has(planActual.toLowerCase());
       const esCandidatoWA = cumpleCalifWA && planNoExcluido;
       
-      // Evaluar criterios para Audios
+      // Evaluar criterios para Audios NORMALES
       const cumpleEstatusAudio = estatus.toUpperCase() === 'CONTACTO';
-      const cumpleDuracion = duracion !== null && duracion >= 180 && duracion <= 480;
-      const esCandidatoAudio = cumpleEstatusAudio && cumpleDuracion;
+      const cumpleDuracion = duracion !== null && duracion >= 120 && duracion <= 600;
+      const noEsVenta = !califUpper.includes('VENTA');  // excluir VENTA
+      const esCandidatoAudio = cumpleEstatusAudio && cumpleDuracion && noEsVenta;
       
-      // Si no califica ni para WA ni para Audio, omitir
-      if (!esCandidatoWA && !esCandidatoAudio) continue;
+      // Evaluar criterios para Audios CUELGA RÁPIDO
+      const cumpleColgo = colgoAgente === 'SI' || colgoAgente === 'SÍ';
+      const cumpleACW = acw !== null && acw >= 240;
+      const cumpleDuracionCorta = duracion !== null && duracion < 10;
+      const cumpleCalifCuelga = califUpper === 'SIN CALIFICACION' || cumpleCalifWA;  // SIN CALIF o NO CONTACTO/AGENDA BUZON
+      const esCandidatoCuelga = cumpleColgo && cumpleACW && cumpleDuracionCorta && cumpleCalifCuelga;
+      
+      // Si no califica para nada, omitir
+      if (!esCandidatoWA && !esCandidatoAudio && !esCandidatoCuelga) continue;
       
       candidatos.push({
         fecha_cc: fechaCc,
@@ -926,23 +971,29 @@ async function cargarCsvTipificacion() {
         telefono_marcado: row[colIdx.telefono_marcado] || '',
         obs_cc: row[colIdx.obs] || '',
         grabacion_cc: row[colIdx.grabacion] || '',
+        colgo_agente_cc: colgoAgente,
+        acw_cc: acw,
         supervisor_nombre: supervisorRaw,
         ubicacion: sede,
         cargado_por_coordinador_id: currentUser.id,
         es_candidato_audit: esCandidatoWA,
         fue_seleccionado: false,
         es_candidato_audio: esCandidatoAudio,
-        fue_seleccionado_audio: false
+        fue_seleccionado_audio: false,
+        es_candidato_cuelga: esCandidatoCuelga,
+        fue_seleccionado_cuelga: false
       });
       
       if (esCandidatoWA) stats.validosWhatsapp++;
       if (esCandidatoAudio) stats.validosAudio++;
+      if (esCandidatoCuelga) stats.validosCuelga++;
       stats.validosCualquiera++;
     }
     
     logCsv(`   ✓ ${stats.validosCualquiera} registros válidos (al menos para una)`, 'success');
     logCsv(`   📱 WhatsApp: ${stats.validosWhatsapp}`, '');
-    logCsv(`   🎧 Audios: ${stats.validosAudio}`, '');
+    logCsv(`   🎧 Audios normales: ${stats.validosAudio}`, '');
+    logCsv(`   ⚡ Audios cuelga rápido: ${stats.validosCuelga}`, '');
     if (stats.fechaIncorrecta > 0) logCsv(`   • ${stats.fechaIncorrecta} con fecha distinta`, '');
     if (stats.sinSupervisor > 0) logCsv(`   ⚠ ${stats.sinSupervisor} sin supervisor mapeado`, 'warning');
     
@@ -1007,12 +1058,12 @@ async function cargarCsvTipificacion() {
     }
     logCsv(`   ✓ ${insertados} registros procesados`, 'success');
     
-    // 8. Re-procesar selección inteligente para WhatsApp y Audios
+    // 8. Re-procesar selección inteligente para WhatsApp, Audios normales y Audios cuelga rápido
     logCsv('8. Recalculando selección de auditoría...', 'info');
     
     // Cargar TODOS los candidatos del día/sede
     const { data: todosCandidatos } = await sbBitacora.from('tipificacion_diaria')
-      .select('id, agente_nombre, supervisor_nombre, dn, fue_seleccionado, es_candidato_audit, fue_seleccionado_audio, es_candidato_audio')
+      .select('id, agente_nombre, supervisor_nombre, dn, fue_seleccionado, es_candidato_audit, fue_seleccionado_audio, es_candidato_audio, fue_seleccionado_cuelga, es_candidato_cuelga')
       .eq('fecha_cc', fecha)
       .eq('ubicacion', sede);
     
@@ -1024,67 +1075,81 @@ async function cargarCsvTipificacion() {
     const idsCapturadasWA = new Set((yaCapturadasWA || []).map(a => a.tipificacion_id).filter(Boolean));
     const idsCapturadasAudio = new Set((yaCapturadasAudio || []).map(a => a.tipificacion_id).filter(Boolean));
     
-    // Agrupar para WhatsApp
+    // Agrupar por tipo de candidato
     const porAgenteWA = {};
-    todosCandidatos.filter(c => c.es_candidato_audit).forEach(c => {
-      const key = c.agente_nombre + '||' + c.supervisor_nombre;
-      if (!porAgenteWA[key]) porAgenteWA[key] = [];
-      porAgenteWA[key].push(c);
-    });
-    
-    // Agrupar para Audios
     const porAgenteAudio = {};
-    todosCandidatos.filter(c => c.es_candidato_audio).forEach(c => {
+    const porAgenteCuelga = {};
+    todosCandidatos.forEach(c => {
       const key = c.agente_nombre + '||' + c.supervisor_nombre;
-      if (!porAgenteAudio[key]) porAgenteAudio[key] = [];
-      porAgenteAudio[key].push(c);
+      if (c.es_candidato_audit) (porAgenteWA[key] = porAgenteWA[key] || []).push(c);
+      if (c.es_candidato_audio) (porAgenteAudio[key] = porAgenteAudio[key] || []).push(c);
+      if (c.es_candidato_cuelga) (porAgenteCuelga[key] = porAgenteCuelga[key] || []).push(c);
     });
     
     let idsParaSeleccionarWA = [];
     let idsParaSeleccionarAudio = [];
+    let idsParaSeleccionarCuelga = [];
     const alertasMalaTipificacion = [];
     const alertasPocosAudios = [];
+    const alertasCuelga = [];
     
     // Selección WhatsApp (5 por agente)
     for (const key in porAgenteWA) {
       const grupo = porAgenteWA[key];
       const [agente, supervisor] = key.split('||');
-      const yaSeleccionados = grupo.filter(c => c.fue_seleccionado);
-      const yaCapturadosDeEste = yaSeleccionados.filter(c => idsCapturadasWA.has(c.id));
-      const seleccionadosNoCapturados = yaSeleccionados.filter(c => !idsCapturadasWA.has(c.id));
-      const noSeleccionados = grupo.filter(c => !c.fue_seleccionado);
-      const seleccionTotal = yaCapturadosDeEste.length + seleccionadosNoCapturados.length;
+      const yaSel = grupo.filter(c => c.fue_seleccionado);
+      const yaCap = yaSel.filter(c => idsCapturadasWA.has(c.id));
+      const selSinCap = yaSel.filter(c => !idsCapturadasWA.has(c.id));
+      const noSel = grupo.filter(c => !c.fue_seleccionado);
+      const seleccionTotal = yaCap.length + selSinCap.length;
       const faltan = 5 - seleccionTotal;
-      
-      if (faltan > 0 && noSeleccionados.length > 0) {
-        const shuffled = [...noSeleccionados].sort(() => Math.random() - 0.5);
+      if (faltan > 0 && noSel.length > 0) {
+        const shuffled = [...noSel].sort(() => Math.random() - 0.5);
         idsParaSeleccionarWA.push(...shuffled.slice(0, faltan).map(s => s.id));
       }
-      
-      const totalEsperado = Math.min(5, seleccionTotal + Math.min(faltan, noSeleccionados.length));
-      if (totalEsperado < 5) {
-        alertasMalaTipificacion.push({ agente, supervisor, total: totalEsperado, capturados: yaCapturadosDeEste.length });
-      }
+      const totalEsperado = Math.min(5, seleccionTotal + Math.min(faltan, noSel.length));
+      if (totalEsperado < 5) alertasMalaTipificacion.push({ agente, supervisor, total: totalEsperado, capturados: yaCap.length });
     }
     
-    // Selección Audios (3 por agente)
+    // Selección Audios NORMALES (3 por agente)
     for (const key in porAgenteAudio) {
       const grupo = porAgenteAudio[key];
       const [agente, supervisor] = key.split('||');
-      const yaSeleccionados = grupo.filter(c => c.fue_seleccionado_audio);
-      const yaCapturadosDeEste = yaSeleccionados.filter(c => idsCapturadasAudio.has(c.id));
-      const seleccionadosNoCapturados = yaSeleccionados.filter(c => !idsCapturadasAudio.has(c.id));
-      const noSeleccionados = grupo.filter(c => !c.fue_seleccionado_audio);
-      const seleccionTotal = yaCapturadosDeEste.length + seleccionadosNoCapturados.length;
+      const yaSel = grupo.filter(c => c.fue_seleccionado_audio);
+      const yaCap = yaSel.filter(c => idsCapturadasAudio.has(c.id));
+      const selSinCap = yaSel.filter(c => !idsCapturadasAudio.has(c.id));
+      const noSel = grupo.filter(c => !c.fue_seleccionado_audio);
+      const seleccionTotal = yaCap.length + selSinCap.length;
       const faltan = 3 - seleccionTotal;
-      
-      if (faltan > 0 && noSeleccionados.length > 0) {
-        const shuffled = [...noSeleccionados].sort(() => Math.random() - 0.5);
+      if (faltan > 0 && noSel.length > 0) {
+        const shuffled = [...noSel].sort(() => Math.random() - 0.5);
         idsParaSeleccionarAudio.push(...shuffled.slice(0, faltan).map(s => s.id));
       }
-      
-      const totalEsperado = Math.min(3, seleccionTotal + Math.min(faltan, noSeleccionados.length));
-      if (totalEsperado < 1) {
+    }
+    
+    // Selección Audios CUELGA RÁPIDO (3 por agente)
+    for (const key in porAgenteCuelga) {
+      const grupo = porAgenteCuelga[key];
+      const [agente, supervisor] = key.split('||');
+      const yaSel = grupo.filter(c => c.fue_seleccionado_cuelga);
+      const yaCap = yaSel.filter(c => idsCapturadasAudio.has(c.id));
+      const selSinCap = yaSel.filter(c => !idsCapturadasAudio.has(c.id));
+      const noSel = grupo.filter(c => !c.fue_seleccionado_cuelga);
+      const seleccionTotal = yaCap.length + selSinCap.length;
+      const faltan = 3 - seleccionTotal;
+      if (faltan > 0 && noSel.length > 0) {
+        const shuffled = [...noSel].sort(() => Math.random() - 0.5);
+        idsParaSeleccionarCuelga.push(...shuffled.slice(0, faltan).map(s => s.id));
+      }
+      alertasCuelga.push({ agente, supervisor, total: Math.min(3, seleccionTotal + Math.min(faltan, noSel.length)) });
+    }
+    
+    // Identificar agentes SIN llamadas normales (para alertarlos)
+    const agentesConCuelga = new Set(Object.keys(porAgenteCuelga));
+    const agentesConAudioNormal = new Set(Object.keys(porAgenteAudio));
+    for (const key of agentesConCuelga) {
+      if (!agentesConAudioNormal.has(key)) {
+        const [agente, supervisor] = key.split('||');
         alertasPocosAudios.push({ agente, supervisor });
       }
     }
@@ -1096,16 +1161,24 @@ async function cargarCsvTipificacion() {
     }
     if (idsParaSeleccionarAudio.length > 0) {
       await sbBitacora.from('tipificacion_diaria').update({ fue_seleccionado_audio: true }).in('id', idsParaSeleccionarAudio);
-      logCsv(`   ✓ ${idsParaSeleccionarAudio.length} llamadas para auditar seleccionadas`, 'success');
+      logCsv(`   ✓ ${idsParaSeleccionarAudio.length} llamadas normales seleccionadas`, 'success');
+    }
+    if (idsParaSeleccionarCuelga.length > 0) {
+      await sbBitacora.from('tipificacion_diaria').update({ fue_seleccionado_cuelga: true }).in('id', idsParaSeleccionarCuelga);
+      logCsv(`   ✓ ${idsParaSeleccionarCuelga.length} llamadas cuelga rápido seleccionadas`, 'success');
     }
     
-    const [{count: totalSeleccionadosWA}, {count: totalSeleccionadosAudio}] = await Promise.all([
+    const [
+      { count: totalSeleccionadosWA },
+      { count: totalSeleccionadosAudio },
+      { count: totalSeleccionadosCuelga }
+    ] = await Promise.all([
       sbBitacora.from('tipificacion_diaria').select('*', { count: 'exact', head: true }).eq('fecha_cc', fecha).eq('ubicacion', sede).eq('fue_seleccionado', true),
-      sbBitacora.from('tipificacion_diaria').select('*', { count: 'exact', head: true }).eq('fecha_cc', fecha).eq('ubicacion', sede).eq('fue_seleccionado_audio', true)
+      sbBitacora.from('tipificacion_diaria').select('*', { count: 'exact', head: true }).eq('fecha_cc', fecha).eq('ubicacion', sede).eq('fue_seleccionado_audio', true),
+      sbBitacora.from('tipificacion_diaria').select('*', { count: 'exact', head: true }).eq('fecha_cc', fecha).eq('ubicacion', sede).eq('fue_seleccionado_cuelga', true)
     ]);
     
-    logCsv(`   ✓ Total WhatsApp seleccionados: ${totalSeleccionadosWA}`, 'success');
-    logCsv(`   ✓ Total Audios seleccionados: ${totalSeleccionadosAudio}`, 'success');
+    logCsv(`   ✓ Total WhatsApp: ${totalSeleccionadosWA} · Audios: ${totalSeleccionadosAudio} · Cuelga: ${totalSeleccionadosCuelga}`, 'success');
     
     if (alertasMalaTipificacion.length > 0) {
       logCsv('───────────────────────────────────────', '');
@@ -1118,7 +1191,7 @@ async function cargarCsvTipificacion() {
     
     if (alertasPocosAudios.length > 0) {
       logCsv('───────────────────────────────────────', '');
-      logCsv('⚠ AGENTES SIN LLAMADAS AUDITABLES (180-480 seg):', 'warning');
+      logCsv('🚨 AGENTES SIN AUDIOS NORMALES (solo cuelga rápido):', 'warning');
       alertasPocosAudios.forEach(a => logCsv(`   • ${a.agente} (sup. ${a.supervisor})`, 'warning'));
     }
     
@@ -1126,12 +1199,12 @@ async function cargarCsvTipificacion() {
     logCsv('───────────────────────────────────────', '');
     logCsv('✅ Carga completada', 'success');
     logCsv(`   • ${stats.total} filas procesadas`, '');
-    logCsv(`   • ${stats.validosWhatsapp} candidatos WhatsApp · ${stats.validosAudio} candidatos Audio`, 'success');
+    logCsv(`   • ${stats.validosWhatsapp} WA · ${stats.validosAudio} Audio normal · ${stats.validosCuelga} Cuelga rápido`, 'success');
     logCsv(`   • ${insertados} registros nuevos agregados`, 'success');
-    logCsv(`   • ${candidatos.length - candidatosNuevos.length} registros ya existían (no se duplican)`, '');
-    logCsv(`   • ${totalSeleccionadosWA} WhatsApp + ${totalSeleccionadosAudio} Audios para auditar`, 'success');
+    logCsv(`   • ${candidatos.length - candidatosNuevos.length} ya existían`, '');
+    logCsv(`   • Para auditar: ${totalSeleccionadosWA} WA + ${totalSeleccionadosAudio} Audios + ${totalSeleccionadosCuelga} Cuelga`, 'success');
     if (alertasMalaTipificacion.length > 0) logCsv(`   ⚠ ${alertasMalaTipificacion.length} alertas mala tipif.`, 'warning');
-    if (alertasPocosAudios.length > 0) logCsv(`   ⚠ ${alertasPocosAudios.length} agentes sin audios`, 'warning');
+    if (alertasPocosAudios.length > 0) logCsv(`   🚨 ${alertasPocosAudios.length} agentes solo con cuelga rápido`, 'warning');
     
   } catch (err) {
     logCsv(`✗ Error: ${err.message}`, 'error');
