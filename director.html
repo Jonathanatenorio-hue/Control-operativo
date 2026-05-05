@@ -876,9 +876,9 @@ async function cargarCsvTipificacion() {
     const planesExcluidosSet = new Set((planesExcl || []).map(p => p.nombre_plan.trim().toLowerCase()));
     logCsv(`   ${planesExcluidosSet.size} planes excluidos en catálogo`, 'success');
     
-    // 3. Cargar supervisores y mapeo
-    logCsv('3. Cargando supervisores y mapeo...', 'info');
-    const { data: sups } = await sbBitacora.from('supervisores').select('id, nombre, ubicacion').eq('activo', true).eq('ubicacion', sede);
+    // 3. Cargar supervisores, mapeo y PLANTILLA del informe-semanal
+    logCsv('3. Cargando supervisores y plantilla del informe-semanal...', 'info');
+    const { data: sups } = await sbBitacora.from('supervisores').select('id, nombre, ubicacion').eq('activo', true);
     const { data: mapeo } = await sbBitacora.from('mapeo_supervisores').select('nombre_origen, supervisor_id');
     
     const supMap = {};
@@ -887,7 +887,24 @@ async function cargarCsvTipificacion() {
       const sup = sups.find(s => s.id === m.supervisor_id);
       if (sup) supMap[m.nombre_origen.toLowerCase().trim()] = sup;
     });
-    logCsv(`   ${sups.length} supervisores activos en ${sede}`, 'success');
+    
+    // FUENTE DE VERDAD: plantilla del informe-semanal (agente → supervisor)
+    const { data: plantilla } = await sbInforme.from('plantilla')
+      .select('nombre, supervisor, centro, estatus')
+      .eq('estatus', 'ACTIVO');
+    
+    // Diccionario: nombre_agente → supervisor (de la plantilla)
+    const agenteSupMap = {};
+    (plantilla || []).forEach(p => {
+      if (p.nombre && p.supervisor) {
+        agenteSupMap[p.nombre.toUpperCase().trim()] = {
+          supervisor_nombre: p.supervisor.trim(),
+          centro: p.centro
+        };
+      }
+    });
+    
+    logCsv(`   ${sups.length} supervisores · ${Object.keys(agenteSupMap).length} agentes en plantilla`, 'success');
     
     // 4. Filtrar registros válidos (para WhatsApp y Audios normales y Audios cuelga rápido)
     logCsv('4. Filtrando registros candidatos...', 'info');
@@ -895,13 +912,17 @@ async function cargarCsvTipificacion() {
     logCsv(`   🎧 Audios normales: CONTACTO + 120-600 seg + NO VENTA`, '');
     logCsv(`   ⚡ Audios cuelga rápido: Colgo=SI + ACW>=240 + dur<10 + SIN_CALIF/NO_CONTACTO`, '');
     logCsv(`   Fecha_CC: ${fecha}`, '');
+    logCsv(`   ⚠ Supervisor se asigna por PLANTILLA (no por columna del CSV)`, 'warning');
     
     const candidatos = [];
     let stats = {
       total: data.length,
       sinFecha: 0,
       fechaIncorrecta: 0,
-      sinSupervisor: 0,
+      sinAgente: 0,
+      agenteNoEnPlantilla: 0,
+      supervisorNoMapeado: 0,
+      sedeIncorrecta: 0,
       validosWhatsapp: 0,
       validosAudio: 0,
       validosCuelga: 0,
@@ -912,7 +933,7 @@ async function cargarCsvTipificacion() {
       const calificacion = (row[colIdx.calificacion] || '').trim();
       const planActual = (row[colIdx.plan] || '').trim();
       const fechaCcRaw = (row[colIdx.fecha_cc] || '').trim();
-      const supervisorRaw = (row[colIdx.supervisor] || '').trim();
+      const agenteRaw = (row[colIdx.gestor] || '').trim();
       const estatus = (row[colIdx.estatus] || '').trim();
       const duracionStr = (row[colIdx.duracion] || '').trim();
       const duracion = duracionStr.match(/^\d+$/) ? parseInt(duracionStr) : null;
@@ -925,12 +946,32 @@ async function cargarCsvTipificacion() {
       const fechaCc = fechaCcRaw.split(' ')[0];
       if (fechaCc !== fecha) { stats.fechaIncorrecta++; continue; }
       
-      // Validar supervisor existe en bitácora
-      const supervisor = supMap[supervisorRaw.toLowerCase()];
-      if (!supervisor) {
-        stats.sinSupervisor++;
+      // Validar nombre del agente
+      if (!agenteRaw) { stats.sinAgente++; continue; }
+      
+      // Buscar agente en plantilla del informe-semanal
+      const datosAgente = agenteSupMap[agenteRaw.toUpperCase()];
+      if (!datosAgente) {
+        stats.agenteNoEnPlantilla++;
         continue;
       }
+      
+      // Validar que el supervisor de la plantilla exista en bitácora
+      const supervisor = supMap[datosAgente.supervisor_nombre.toLowerCase()];
+      if (!supervisor) {
+        stats.supervisorNoMapeado++;
+        continue;
+      }
+      
+      // Validar que el centro del agente coincida con la sede del CSV
+      // CC2 = Puebla, JV = CDMX
+      if (supervisor.ubicacion !== sede) {
+        stats.sedeIncorrecta++;
+        continue;
+      }
+      
+      // Nombre del supervisor a guardar (el oficial, no el del CSV)
+      const supervisorNombre = supervisor.nombre;
       
       // Evaluar criterios para WhatsApp
       const califUpper = calificacion.toUpperCase();
@@ -973,7 +1014,7 @@ async function cargarCsvTipificacion() {
         grabacion_cc: row[colIdx.grabacion] || '',
         colgo_agente_cc: colgoAgente,
         acw_cc: acw,
-        supervisor_nombre: supervisorRaw,
+        supervisor_nombre: supervisorNombre,
         ubicacion: sede,
         cargado_por_coordinador_id: currentUser.id,
         es_candidato_audit: esCandidatoWA,
@@ -995,7 +1036,10 @@ async function cargarCsvTipificacion() {
     logCsv(`   🎧 Audios normales: ${stats.validosAudio}`, '');
     logCsv(`   ⚡ Audios cuelga rápido: ${stats.validosCuelga}`, '');
     if (stats.fechaIncorrecta > 0) logCsv(`   • ${stats.fechaIncorrecta} con fecha distinta`, '');
-    if (stats.sinSupervisor > 0) logCsv(`   ⚠ ${stats.sinSupervisor} sin supervisor mapeado`, 'warning');
+    if (stats.sinAgente > 0) logCsv(`   • ${stats.sinAgente} sin nombre de agente`, '');
+    if (stats.agenteNoEnPlantilla > 0) logCsv(`   ⚠ ${stats.agenteNoEnPlantilla} agentes no encontrados en plantilla`, 'warning');
+    if (stats.supervisorNoMapeado > 0) logCsv(`   ⚠ ${stats.supervisorNoMapeado} con supervisor no mapeado en bitácora`, 'warning');
+    if (stats.sedeIncorrecta > 0) logCsv(`   • ${stats.sedeIncorrecta} de otra sede (descartados)`, '');
     
     if (candidatos.length === 0) {
       logCsv('✗ No hay registros válidos para procesar', 'error');
