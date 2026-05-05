@@ -822,6 +822,8 @@ async function cargarCsvTipificacion() {
       fecha_renov: headers.indexOf('fecha_para_renovacion'),
       plan: headers.indexOf('plan_actual'),
       ciudad: headers.indexOf('ciudad'),
+      duracion: headers.indexOf('Duracion_CC'),
+      telefono_marcado: headers.indexOf('Telefono_Marcado_CC'),
       fecha_cc: headers.indexOf('Fecha_CC'),
       gestor: headers.indexOf('Gestor_CC'),  // este es el AGENTE
       estatus: headers.indexOf('Estatus_CC'),
@@ -855,21 +857,21 @@ async function cargarCsvTipificacion() {
     });
     logCsv(`   ${sups.length} supervisores activos en ${sede}`, 'success');
     
-    // 4. Filtrar registros válidos
+    // 4. Filtrar registros válidos (para WhatsApp y para Audios)
     logCsv('4. Filtrando registros candidatos...', 'info');
-    logCsv(`   - Calificación: NO CONTACTO / AGENDA BUZON`, '');
-    logCsv(`   - Fecha_CC: ${fecha}`, '');
-    logCsv(`   - Plan NO en lista de exclusión`, '');
+    logCsv(`   📱 WhatsApp: NO CONTACTO / AGENDA BUZON + plan no excluido`, '');
+    logCsv(`   🎧 Audios: CONTACTO + duración 180-480 seg`, '');
+    logCsv(`   Fecha_CC: ${fecha}`, '');
     
     const candidatos = [];
     let stats = {
       total: data.length,
       sinFecha: 0,
       fechaIncorrecta: 0,
-      calificacionNoOk: 0,
-      planExcluido: 0,
       sinSupervisor: 0,
-      validos: 0
+      validosWhatsapp: 0,
+      validosAudio: 0,
+      validosCualquiera: 0
     };
     
     for (const row of data) {
@@ -877,24 +879,14 @@ async function cargarCsvTipificacion() {
       const planActual = (row[colIdx.plan] || '').trim();
       const fechaCcRaw = (row[colIdx.fecha_cc] || '').trim();
       const supervisorRaw = (row[colIdx.supervisor] || '').trim();
+      const estatus = (row[colIdx.estatus] || '').trim();
+      const duracionStr = (row[colIdx.duracion] || '').trim();
+      const duracion = duracionStr.match(/^\d+$/) ? parseInt(duracionStr) : null;
       
       // Validar fecha
       if (!fechaCcRaw) { stats.sinFecha++; continue; }
-      const fechaCc = fechaCcRaw.split(' ')[0]; // "2026-05-02 10:08:02" → "2026-05-02"
+      const fechaCc = fechaCcRaw.split(' ')[0];
       if (fechaCc !== fecha) { stats.fechaIncorrecta++; continue; }
-      
-      // Validar calificación
-      const califUpper = calificacion.toUpperCase();
-      if (!califUpper.includes('NO CONTACTO') && !califUpper.includes('AGENDA BUZON') && !califUpper.includes('AGENDA / BUZON')) {
-        stats.calificacionNoOk++;
-        continue;
-      }
-      
-      // Validar plan no excluido
-      if (planesExcluidosSet.has(planActual.toLowerCase())) {
-        stats.planExcluido++;
-        continue;
-      }
       
       // Validar supervisor existe en bitácora
       const supervisor = supMap[supervisorRaw.toLowerCase()];
@@ -902,6 +894,20 @@ async function cargarCsvTipificacion() {
         stats.sinSupervisor++;
         continue;
       }
+      
+      // Evaluar criterios para WhatsApp
+      const califUpper = calificacion.toUpperCase();
+      const cumpleCalifWA = califUpper.includes('NO CONTACTO') || califUpper.includes('AGENDA BUZON') || califUpper.includes('AGENDA / BUZON');
+      const planNoExcluido = !planesExcluidosSet.has(planActual.toLowerCase());
+      const esCandidatoWA = cumpleCalifWA && planNoExcluido;
+      
+      // Evaluar criterios para Audios
+      const cumpleEstatusAudio = estatus.toUpperCase() === 'CONTACTO';
+      const cumpleDuracion = duracion !== null && duracion >= 180 && duracion <= 480;
+      const esCandidatoAudio = cumpleEstatusAudio && cumpleDuracion;
+      
+      // Si no califica ni para WA ni para Audio, omitir
+      if (!esCandidatoWA && !esCandidatoAudio) continue;
       
       candidatos.push({
         fecha_cc: fechaCc,
@@ -914,23 +920,30 @@ async function cargarCsvTipificacion() {
         plan_actual: planActual,
         ciudad: row[colIdx.ciudad] || '',
         agente_nombre: (row[colIdx.gestor] || '').trim(),
-        estatus_cc: row[colIdx.estatus] || '',
+        estatus_cc: estatus,
         calificacion_cc: calificacion,
+        duracion_cc: duracion,
+        telefono_marcado: row[colIdx.telefono_marcado] || '',
         obs_cc: row[colIdx.obs] || '',
         grabacion_cc: row[colIdx.grabacion] || '',
         supervisor_nombre: supervisorRaw,
         ubicacion: sede,
         cargado_por_coordinador_id: currentUser.id,
-        es_candidato_audit: true,
-        fue_seleccionado: false
+        es_candidato_audit: esCandidatoWA,
+        fue_seleccionado: false,
+        es_candidato_audio: esCandidatoAudio,
+        fue_seleccionado_audio: false
       });
-      stats.validos++;
+      
+      if (esCandidatoWA) stats.validosWhatsapp++;
+      if (esCandidatoAudio) stats.validosAudio++;
+      stats.validosCualquiera++;
     }
     
-    logCsv(`   ✓ ${stats.validos} registros válidos`, 'success');
+    logCsv(`   ✓ ${stats.validosCualquiera} registros válidos (al menos para una)`, 'success');
+    logCsv(`   📱 WhatsApp: ${stats.validosWhatsapp}`, '');
+    logCsv(`   🎧 Audios: ${stats.validosAudio}`, '');
     if (stats.fechaIncorrecta > 0) logCsv(`   • ${stats.fechaIncorrecta} con fecha distinta`, '');
-    if (stats.calificacionNoOk > 0) logCsv(`   • ${stats.calificacionNoOk} con calificación distinta`, '');
-    if (stats.planExcluido > 0) logCsv(`   • ${stats.planExcluido} con plan excluido`, '');
     if (stats.sinSupervisor > 0) logCsv(`   ⚠ ${stats.sinSupervisor} sin supervisor mapeado`, 'warning');
     
     if (candidatos.length === 0) {
@@ -994,109 +1007,131 @@ async function cargarCsvTipificacion() {
     }
     logCsv(`   ✓ ${insertados} registros procesados`, 'success');
     
-    // 8. Re-procesar selección inteligente (mantiene capturados, completa hasta 5)
+    // 8. Re-procesar selección inteligente para WhatsApp y Audios
     logCsv('8. Recalculando selección de auditoría...', 'info');
     
-    // Cargar TODOS los candidatos del día/sede (los nuevos + los previos)
+    // Cargar TODOS los candidatos del día/sede
     const { data: todosCandidatos } = await sbBitacora.from('tipificacion_diaria')
-      .select('id, id_cc, agente_nombre, supervisor_nombre, dn, fue_seleccionado, es_candidato_audit')
+      .select('id, agente_nombre, supervisor_nombre, dn, fue_seleccionado, es_candidato_audit, fue_seleccionado_audio, es_candidato_audio')
       .eq('fecha_cc', fecha)
-      .eq('ubicacion', sede)
-      .eq('es_candidato_audit', true);
+      .eq('ubicacion', sede);
     
-    // Cargar tipificaciones que YA fueron capturadas (las que tienen auditoría)
     const idsCandidatos = (todosCandidatos || []).map(c => c.id);
-    const { data: yaCapturadas } = await sbBitacora.from('auditoria_whatsapp')
-      .select('tipificacion_id')
-      .in('tipificacion_id', idsCandidatos);
-    const idsCapturadasSet = new Set((yaCapturadas || []).map(a => a.tipificacion_id));
+    const [{data: yaCapturadasWA}, {data: yaCapturadasAudio}] = await Promise.all([
+      sbBitacora.from('auditoria_whatsapp').select('tipificacion_id').in('tipificacion_id', idsCandidatos),
+      sbBitacora.from('auditoria_audios').select('tipificacion_id').in('tipificacion_id', idsCandidatos)
+    ]);
+    const idsCapturadasWA = new Set((yaCapturadasWA || []).map(a => a.tipificacion_id).filter(Boolean));
+    const idsCapturadasAudio = new Set((yaCapturadasAudio || []).map(a => a.tipificacion_id).filter(Boolean));
     
-    // Agrupar candidatos por agente
-    const porAgente2 = {};
-    todosCandidatos.forEach(c => {
+    // Agrupar para WhatsApp
+    const porAgenteWA = {};
+    todosCandidatos.filter(c => c.es_candidato_audit).forEach(c => {
       const key = c.agente_nombre + '||' + c.supervisor_nombre;
-      if (!porAgente2[key]) porAgente2[key] = [];
-      porAgente2[key].push(c);
+      if (!porAgenteWA[key]) porAgenteWA[key] = [];
+      porAgenteWA[key].push(c);
     });
     
-    let idsParaSeleccionar = [];
-    let idsParaDeseleccionar = [];
-    const alertasMalaTipificacion = [];
+    // Agrupar para Audios
+    const porAgenteAudio = {};
+    todosCandidatos.filter(c => c.es_candidato_audio).forEach(c => {
+      const key = c.agente_nombre + '||' + c.supervisor_nombre;
+      if (!porAgenteAudio[key]) porAgenteAudio[key] = [];
+      porAgenteAudio[key].push(c);
+    });
     
-    for (const key in porAgente2) {
-      const grupo = porAgente2[key];
+    let idsParaSeleccionarWA = [];
+    let idsParaSeleccionarAudio = [];
+    const alertasMalaTipificacion = [];
+    const alertasPocosAudios = [];
+    
+    // Selección WhatsApp (5 por agente)
+    for (const key in porAgenteWA) {
+      const grupo = porAgenteWA[key];
       const [agente, supervisor] = key.split('||');
-      
-      // Separar por estado
       const yaSeleccionados = grupo.filter(c => c.fue_seleccionado);
-      const yaCapturadosDeEste = yaSeleccionados.filter(c => idsCapturadasSet.has(c.id));
-      const seleccionadosNoCapturados = yaSeleccionados.filter(c => !idsCapturadasSet.has(c.id));
+      const yaCapturadosDeEste = yaSeleccionados.filter(c => idsCapturadasWA.has(c.id));
+      const seleccionadosNoCapturados = yaSeleccionados.filter(c => !idsCapturadasWA.has(c.id));
       const noSeleccionados = grupo.filter(c => !c.fue_seleccionado);
-      
-      // Cuántos faltan para completar 5
       const seleccionTotal = yaCapturadosDeEste.length + seleccionadosNoCapturados.length;
       const faltan = 5 - seleccionTotal;
       
       if (faltan > 0 && noSeleccionados.length > 0) {
-        // Faltan + hay nuevos disponibles → seleccionar aleatoriamente para completar
         const shuffled = [...noSeleccionados].sort(() => Math.random() - 0.5);
-        const aSeleccionar = shuffled.slice(0, faltan);
-        idsParaSeleccionar.push(...aSeleccionar.map(s => s.id));
+        idsParaSeleccionarWA.push(...shuffled.slice(0, faltan).map(s => s.id));
       }
       
-      // Verificar total final esperado
-      const totalEsperado = Math.min(5, yaCapturadosDeEste.length + seleccionadosNoCapturados.length + Math.min(faltan, noSeleccionados.length));
-      
+      const totalEsperado = Math.min(5, seleccionTotal + Math.min(faltan, noSeleccionados.length));
       if (totalEsperado < 5) {
-        alertasMalaTipificacion.push({ 
-          agente, 
-          supervisor, 
-          total: totalEsperado,
-          capturados: yaCapturadosDeEste.length 
-        });
+        alertasMalaTipificacion.push({ agente, supervisor, total: totalEsperado, capturados: yaCapturadosDeEste.length });
       }
     }
     
-    // Aplicar updates en batch
-    if (idsParaSeleccionar.length > 0) {
-      const { error: errSel } = await sbBitacora.from('tipificacion_diaria')
-        .update({ fue_seleccionado: true })
-        .in('id', idsParaSeleccionar);
-      if (errSel) logCsv(`   ⚠ Error marcando: ${errSel.message}`, 'warning');
-      else logCsv(`   ✓ ${idsParaSeleccionar.length} casos nuevos seleccionados para completar a 5/agente`, 'success');
-    } else {
-      logCsv(`   • No se requirieron nuevas selecciones (ya tenían 5 o no hay más candidatos)`, '');
+    // Selección Audios (3 por agente)
+    for (const key in porAgenteAudio) {
+      const grupo = porAgenteAudio[key];
+      const [agente, supervisor] = key.split('||');
+      const yaSeleccionados = grupo.filter(c => c.fue_seleccionado_audio);
+      const yaCapturadosDeEste = yaSeleccionados.filter(c => idsCapturadasAudio.has(c.id));
+      const seleccionadosNoCapturados = yaSeleccionados.filter(c => !idsCapturadasAudio.has(c.id));
+      const noSeleccionados = grupo.filter(c => !c.fue_seleccionado_audio);
+      const seleccionTotal = yaCapturadosDeEste.length + seleccionadosNoCapturados.length;
+      const faltan = 3 - seleccionTotal;
+      
+      if (faltan > 0 && noSeleccionados.length > 0) {
+        const shuffled = [...noSeleccionados].sort(() => Math.random() - 0.5);
+        idsParaSeleccionarAudio.push(...shuffled.slice(0, faltan).map(s => s.id));
+      }
+      
+      const totalEsperado = Math.min(3, seleccionTotal + Math.min(faltan, noSeleccionados.length));
+      if (totalEsperado < 1) {
+        alertasPocosAudios.push({ agente, supervisor });
+      }
     }
     
-    // Conteo final
-    const { count: totalSeleccionadosFinal } = await sbBitacora.from('tipificacion_diaria')
-      .select('*', { count: 'exact', head: true })
-      .eq('fecha_cc', fecha)
-      .eq('ubicacion', sede)
-      .eq('fue_seleccionado', true);
+    // Aplicar updates
+    if (idsParaSeleccionarWA.length > 0) {
+      await sbBitacora.from('tipificacion_diaria').update({ fue_seleccionado: true }).in('id', idsParaSeleccionarWA);
+      logCsv(`   ✓ ${idsParaSeleccionarWA.length} casos WhatsApp seleccionados`, 'success');
+    }
+    if (idsParaSeleccionarAudio.length > 0) {
+      await sbBitacora.from('tipificacion_diaria').update({ fue_seleccionado_audio: true }).in('id', idsParaSeleccionarAudio);
+      logCsv(`   ✓ ${idsParaSeleccionarAudio.length} llamadas para auditar seleccionadas`, 'success');
+    }
     
-    logCsv(`   ✓ Total seleccionados para auditar: ${totalSeleccionadosFinal}`, 'success');
-    logCsv(`   • ${Object.keys(porAgente2).length} agentes con candidatos`, '');
+    const [{count: totalSeleccionadosWA}, {count: totalSeleccionadosAudio}] = await Promise.all([
+      sbBitacora.from('tipificacion_diaria').select('*', { count: 'exact', head: true }).eq('fecha_cc', fecha).eq('ubicacion', sede).eq('fue_seleccionado', true),
+      sbBitacora.from('tipificacion_diaria').select('*', { count: 'exact', head: true }).eq('fecha_cc', fecha).eq('ubicacion', sede).eq('fue_seleccionado_audio', true)
+    ]);
+    
+    logCsv(`   ✓ Total WhatsApp seleccionados: ${totalSeleccionadosWA}`, 'success');
+    logCsv(`   ✓ Total Audios seleccionados: ${totalSeleccionadosAudio}`, 'success');
     
     if (alertasMalaTipificacion.length > 0) {
       logCsv('───────────────────────────────────────', '');
-      logCsv('⚠ ALERTAS DE RIESGO DE MALA TIPIFICACIÓN:', 'warning');
+      logCsv('⚠ ALERTAS DE MALA TIPIFICACIÓN (WhatsApp):', 'warning');
       alertasMalaTipificacion.forEach(a => {
         const adicional = a.capturados > 0 ? ` (${a.capturados} ya capturado/s)` : '';
         logCsv(`   • ${a.agente} (sup. ${a.supervisor}): solo ${a.total} caso(s)${adicional}`, 'warning');
       });
-      logCsv('   → Revisar si estos agentes están tipificando bien los casos.', 'warning');
+    }
+    
+    if (alertasPocosAudios.length > 0) {
+      logCsv('───────────────────────────────────────', '');
+      logCsv('⚠ AGENTES SIN LLAMADAS AUDITABLES (180-480 seg):', 'warning');
+      alertasPocosAudios.forEach(a => logCsv(`   • ${a.agente} (sup. ${a.supervisor})`, 'warning'));
     }
     
     // 9. Resumen final
     logCsv('───────────────────────────────────────', '');
     logCsv('✅ Carga completada', 'success');
     logCsv(`   • ${stats.total} filas procesadas`, '');
-    logCsv(`   • ${stats.validos} candidatos válidos en este archivo`, 'success');
+    logCsv(`   • ${stats.validosWhatsapp} candidatos WhatsApp · ${stats.validosAudio} candidatos Audio`, 'success');
     logCsv(`   • ${insertados} registros nuevos agregados`, 'success');
     logCsv(`   • ${candidatos.length - candidatosNuevos.length} registros ya existían (no se duplican)`, '');
-    logCsv(`   • ${totalSeleccionadosFinal} casos totales seleccionados para auditoría`, 'success');
-    if (alertasMalaTipificacion.length > 0) logCsv(`   ⚠ ${alertasMalaTipificacion.length} alertas de mala tipificación`, 'warning');
+    logCsv(`   • ${totalSeleccionadosWA} WhatsApp + ${totalSeleccionadosAudio} Audios para auditar`, 'success');
+    if (alertasMalaTipificacion.length > 0) logCsv(`   ⚠ ${alertasMalaTipificacion.length} alertas mala tipif.`, 'warning');
+    if (alertasPocosAudios.length > 0) logCsv(`   ⚠ ${alertasPocosAudios.length} agentes sin audios`, 'warning');
     
   } catch (err) {
     logCsv(`✗ Error: ${err.message}`, 'error');
