@@ -1348,16 +1348,9 @@ async function renderModalAudios(act, cat) {
     });
     const nombresUpper = nombresSupervisor.map(n => n.toUpperCase());
     
-    // 1. Cargar AGENTES PRESENTES de hoy (los que pasaron lista)
-    // Buscar la asistencia del supervisor para hoy
+    // 1. Cargar AGENTES PRESENTES de hoy (ya están en agentesPresentesIds desde el inicio)
+    const agentesPresentesHoy = agentesActivos.filter(a => agentesPresentesIds.includes(a.id));
     const hoyLocal = getFechaLocal(new Date());
-    const { data: asistenciaHoy } = await sb.from('asistencia_diaria')
-      .select('agente_id, agentes(id, nombre)')
-      .eq('supervisor_id', currentSupervisor.id)
-      .eq('fecha', hoyLocal)
-      .eq('presente', true);
-    
-    const agentesPresentesHoy = (asistenciaHoy || []).map(a => a.agentes).filter(Boolean);
     
     // 2. Cargar llamadas seleccionadas (normales + cuelga rápido)
     const { data: llamadasRaw } = await sb.from('tipificacion_diaria')
