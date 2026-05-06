@@ -256,15 +256,11 @@
         
         <div style="background: rgba(0,0,0,0.2); border-radius: 10px; padding: 16px; margin: 16px 0; text-align: left;">
           <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:12px;">
-            <label style="font-size:12px; font-weight:600; color:rgba(255,255,255,0.7);">Sede:</label>
-            <select id="csv-sede" style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 8px 12px; color: white; font-size: 13px;">
-              <option value="CC2">CC2 Puebla</option>
-              <option value="JV">JV CDMX</option>
-            </select>
-            
-            <label style="font-size:12px; font-weight:600; color:rgba(255,255,255,0.7); margin-left:12px;">Fecha del reporte:</label>
+            <label style="font-size:12px; font-weight:600; color:rgba(255,255,255,0.7);">Fecha del reporte:</label>
             <input type="date" id="csv-fecha" style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 8px 12px; color: white; font-size: 13px;">
           </div>
+          
+          <p style="font-size:11px; color:rgba(255,255,255,0.5); margin-bottom:8px;">💡 La sede de cada agente se asigna automáticamente desde la plantilla del informe-semanal.</p>
           
           <input type="file" id="csv-file" accept=".csv" style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 10px; color: white; font-size: 13px; width: 100%;">
         </div>
@@ -817,7 +813,6 @@ function leerArchivoConEncoding(file) {
 
 async function cargarCsvTipificacion() {
   const fileInput = document.getElementById('csv-file');
-  const sede = document.getElementById('csv-sede').value;
   const fecha = document.getElementById('csv-fecha').value;
   const btn = document.getElementById('csv-cargar-btn');
   
@@ -830,7 +825,7 @@ async function cargarCsvTipificacion() {
     return;
   }
   
-  if (!confirm(`¿Procesar CSV de ${sede} para la fecha ${fecha}? Esto reemplazará registros previos del mismo día/sede.`)) return;
+  if (!confirm(`¿Procesar CSV para la fecha ${fecha}? Se asignarán los registros automáticamente al centro/supervisor de cada agente según la plantilla.`)) return;
   
   btn.disabled = true;
   btn.innerHTML = '<span class="loader"></span> Procesando...';
@@ -931,7 +926,6 @@ async function cargarCsvTipificacion() {
       sinAgente: 0,
       agenteNoEnPlantilla: 0,
       supervisorNoMapeado: 0,
-      sedeIncorrecta: 0,
       validosWhatsapp: 0,
       validosAudio: 0,
       validosCuelga: 0,
@@ -972,12 +966,8 @@ async function cargarCsvTipificacion() {
         continue;
       }
       
-      // Validar que el centro del agente coincida con la sede del CSV
-      // CC2 = Puebla, JV = CDMX
-      if (supervisor.ubicacion !== sede) {
-        stats.sedeIncorrecta++;
-        continue;
-      }
+      // La sede se asigna automáticamente del supervisor (que viene de la plantilla)
+      const sedeAgente = supervisor.ubicacion;
       
       // Nombre del supervisor a guardar (el oficial, no el del CSV)
       const supervisorNombre = supervisor.nombre;
@@ -1001,8 +991,11 @@ async function cargarCsvTipificacion() {
       const cumpleCalifCuelga = califUpper === 'SIN CALIFICACION' || cumpleCalifWA;  // SIN CALIF o NO CONTACTO/AGENDA BUZON
       const esCandidatoCuelga = cumpleColgo && cumpleACW && cumpleDuracionCorta && cumpleCalifCuelga;
       
+      // Evaluar criterios para IMPROCEDENTE (validar tipificación si agente no tiene audios ni cuelga)
+      const esCandidatoImprocedente = estatus.toUpperCase() === 'IMPROCEDENTE';
+      
       // Si no califica para nada, omitir
-      if (!esCandidatoWA && !esCandidatoAudio && !esCandidatoCuelga) continue;
+      if (!esCandidatoWA && !esCandidatoAudio && !esCandidatoCuelga && !esCandidatoImprocedente) continue;
       
       candidatos.push({
         fecha_cc: fechaCc,
@@ -1024,19 +1017,22 @@ async function cargarCsvTipificacion() {
         colgo_agente_cc: colgoAgente,
         acw_cc: acw,
         supervisor_nombre: supervisorNombre,
-        ubicacion: sede,
+        ubicacion: sedeAgente,
         cargado_por_coordinador_id: currentUser.id,
         es_candidato_audit: esCandidatoWA,
         fue_seleccionado: false,
         es_candidato_audio: esCandidatoAudio,
         fue_seleccionado_audio: false,
         es_candidato_cuelga: esCandidatoCuelga,
-        fue_seleccionado_cuelga: false
+        fue_seleccionado_cuelga: false,
+        es_candidato_improcedente: esCandidatoImprocedente,
+        fue_seleccionado_improcedente: false
       });
       
       if (esCandidatoWA) stats.validosWhatsapp++;
       if (esCandidatoAudio) stats.validosAudio++;
       if (esCandidatoCuelga) stats.validosCuelga++;
+      if (esCandidatoImprocedente) stats.validosImprocedente = (stats.validosImprocedente || 0) + 1;
       stats.validosCualquiera++;
     }
     
@@ -1048,7 +1044,6 @@ async function cargarCsvTipificacion() {
     if (stats.sinAgente > 0) logCsv(`   • ${stats.sinAgente} sin nombre de agente`, '');
     if (stats.agenteNoEnPlantilla > 0) logCsv(`   ⚠ ${stats.agenteNoEnPlantilla} agentes no encontrados en plantilla`, 'warning');
     if (stats.supervisorNoMapeado > 0) logCsv(`   ⚠ ${stats.supervisorNoMapeado} con supervisor no mapeado en bitácora`, 'warning');
-    if (stats.sedeIncorrecta > 0) logCsv(`   • ${stats.sedeIncorrecta} de otra sede (descartados)`, '');
     
     if (candidatos.length === 0) {
       logCsv('✗ No hay registros válidos para procesar', 'error');
@@ -1082,7 +1077,7 @@ async function cargarCsvTipificacion() {
       const { data: pagEx } = await sbBitacora.from('tipificacion_diaria')
         .select('dn')
         .eq('fecha_cc', fecha)
-        .eq('ubicacion', sede)
+        
         .range(offsetEx, offsetEx + 999);
       if (!pagEx || pagEx.length === 0) break;
       existentes = existentes.concat(pagEx);
@@ -1129,9 +1124,9 @@ async function cargarCsvTipificacion() {
     const PAGE_SIZE = 1000;
     while (true) {
       const { data: pagina } = await sbBitacora.from('tipificacion_diaria')
-        .select('id, agente_nombre, supervisor_nombre, dn, fue_seleccionado, es_candidato_audit, fue_seleccionado_audio, es_candidato_audio, fue_seleccionado_cuelga, es_candidato_cuelga')
+        .select('id, agente_nombre, supervisor_nombre, dn, fue_seleccionado, es_candidato_audit, fue_seleccionado_audio, es_candidato_audio, fue_seleccionado_cuelga, es_candidato_cuelga, fue_seleccionado_improcedente, es_candidato_improcedente')
         .eq('fecha_cc', fecha)
-        .eq('ubicacion', sede)
+        
         .range(offset, offset + PAGE_SIZE - 1);
       if (!pagina || pagina.length === 0) break;
       todosCandidatos = todosCandidatos.concat(pagina);
@@ -1152,11 +1147,13 @@ async function cargarCsvTipificacion() {
     const porAgenteWA = {};
     const porAgenteAudio = {};
     const porAgenteCuelga = {};
+    const porAgenteImprocedente = {};
     todosCandidatos.forEach(c => {
       const key = c.agente_nombre + '||' + c.supervisor_nombre;
       if (c.es_candidato_audit) (porAgenteWA[key] = porAgenteWA[key] || []).push(c);
       if (c.es_candidato_audio) (porAgenteAudio[key] = porAgenteAudio[key] || []).push(c);
       if (c.es_candidato_cuelga) (porAgenteCuelga[key] = porAgenteCuelga[key] || []).push(c);
+      if (c.es_candidato_improcedente) (porAgenteImprocedente[key] = porAgenteImprocedente[key] || []).push(c);
     });
     
     let idsParaSeleccionarWA = [];
@@ -1217,6 +1214,28 @@ async function cargarCsvTipificacion() {
       alertasCuelga.push({ agente, supervisor, total: Math.min(3, seleccionTotal + Math.min(faltan, noSel.length)) });
     }
     
+    // Selección IMPROCEDENTE (3 por agente, SOLO si no tiene candidatos audio ni cuelga)
+    let idsParaSeleccionarImprocedente = [];
+    const agentesConAudioNormalSet = new Set(Object.keys(porAgenteAudio));
+    const agentesConCuelgaSet = new Set(Object.keys(porAgenteCuelga));
+    
+    for (const key in porAgenteImprocedente) {
+      // Solo seleccionar improcedentes si NO tiene audios normales NI cuelga rápido
+      if (agentesConAudioNormalSet.has(key) || agentesConCuelgaSet.has(key)) continue;
+      
+      const grupo = porAgenteImprocedente[key];
+      const yaSel = grupo.filter(c => c.fue_seleccionado_improcedente);
+      const yaCap = yaSel.filter(c => idsCapturadasAudio.has(c.id));
+      const selSinCap = yaSel.filter(c => !idsCapturadasAudio.has(c.id));
+      const noSel = grupo.filter(c => !c.fue_seleccionado_improcedente);
+      const seleccionTotal = yaCap.length + selSinCap.length;
+      const faltan = 3 - seleccionTotal;
+      if (faltan > 0 && noSel.length > 0) {
+        const shuffled = [...noSel].sort(() => Math.random() - 0.5);
+        idsParaSeleccionarImprocedente.push(...shuffled.slice(0, faltan).map(s => s.id));
+      }
+    }
+    
     // Identificar agentes SIN llamadas normales (para alertarlos)
     const agentesConCuelga = new Set(Object.keys(porAgenteCuelga));
     const agentesConAudioNormal = new Set(Object.keys(porAgenteAudio));
@@ -1240,15 +1259,19 @@ async function cargarCsvTipificacion() {
       await sbBitacora.from('tipificacion_diaria').update({ fue_seleccionado_cuelga: true }).in('id', idsParaSeleccionarCuelga);
       logCsv(`   ✓ ${idsParaSeleccionarCuelga.length} llamadas cuelga rápido seleccionadas`, 'success');
     }
+    if (idsParaSeleccionarImprocedente.length > 0) {
+      await sbBitacora.from('tipificacion_diaria').update({ fue_seleccionado_improcedente: true }).in('id', idsParaSeleccionarImprocedente);
+      logCsv(`   ✓ ${idsParaSeleccionarImprocedente.length} llamadas improcedente seleccionadas (validar tipificación)`, 'success');
+    }
     
     const [
       { count: totalSeleccionadosWA },
       { count: totalSeleccionadosAudio },
       { count: totalSeleccionadosCuelga }
     ] = await Promise.all([
-      sbBitacora.from('tipificacion_diaria').select('*', { count: 'exact', head: true }).eq('fecha_cc', fecha).eq('ubicacion', sede).eq('fue_seleccionado', true),
-      sbBitacora.from('tipificacion_diaria').select('*', { count: 'exact', head: true }).eq('fecha_cc', fecha).eq('ubicacion', sede).eq('fue_seleccionado_audio', true),
-      sbBitacora.from('tipificacion_diaria').select('*', { count: 'exact', head: true }).eq('fecha_cc', fecha).eq('ubicacion', sede).eq('fue_seleccionado_cuelga', true)
+      sbBitacora.from('tipificacion_diaria').select('*', { count: 'exact', head: true }).eq('fecha_cc', fecha).eq('fue_seleccionado', true),
+      sbBitacora.from('tipificacion_diaria').select('*', { count: 'exact', head: true }).eq('fecha_cc', fecha).eq('fue_seleccionado_audio', true),
+      sbBitacora.from('tipificacion_diaria').select('*', { count: 'exact', head: true }).eq('fecha_cc', fecha).eq('fue_seleccionado_cuelga', true)
     ]);
     
     logCsv(`   ✓ Total WhatsApp: ${totalSeleccionadosWA} · Audios: ${totalSeleccionadosAudio} · Cuelga: ${totalSeleccionadosCuelga}`, 'success');
