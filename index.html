@@ -625,7 +625,7 @@ async function abrirActividad(bitacoraActividadId) {
   
   const { data: evs } = await sb.from('evidencias').select('*, agentes(nombre)').eq('bitacora_actividad_id', act.id);
   
-  if (cat.tipo === 'HABITO') renderModalHabito(act, cat);
+  if (cat.tipo === 'HABITO') await renderModalHabito(act, cat);
   else if (cat.codigo === 'RECURSO_POSTVENTA') await renderModalPostVenta(act, cat);
   else if (cat.codigo === 'AUDITORIA_AUDIOS') await renderModalAudios(act, cat);
   else if (cat.codigo === 'AUDITORIA_WHATSAPP') await renderModalWhatsapp(act, cat);
@@ -638,7 +638,7 @@ async function abrirActividad(bitacoraActividadId) {
   document.getElementById('modal-overlay').classList.add('show');
 }
 
-function renderModalHabito(act, cat) {
+async function renderModalHabito(act, cat) {
   const ahora = new Date();
   const horaTxt = ahora.toLocaleTimeString('es-MX', {hour:'2-digit',minute:'2-digit'});
   let warning = '';
@@ -659,7 +659,72 @@ function renderModalHabito(act, cat) {
     extraField = `<div class="form-group"><label>3 puntos clave tratados (obligatorio)</label><textarea id="comentarios-input" rows="4" placeholder="1. ...\n2. ...\n3. ...">${act.comentarios || ''}</textarea></div>`;
   }
   
-  document.getElementById('modal-body').innerHTML = `${warning}<p style="margin-bottom:16px; color:rgba(255,255,255,0.8);">Hora actual: <strong>${horaTxt}</strong><br>${act.timestamp_marcado ? `Ya marcaste a las <strong>${new Date(act.timestamp_marcado).toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'})}</strong>` : ''}</p>${extraField}`;
+  // Historico mensual del supervisor para esta actividad
+  const inicioMes = new Date(ahora.getFullYear(), ahora.getMonth(), 1);
+  const inicioMesStr = getFechaLocal(inicioMes);
+  const hoyStr = getFechaLocal(ahora);
+  
+  // Obtener todas las bitácoras del supervisor en el mes
+  const { data: bitacorasMes } = await sb.from('bitacora_supervisor_diaria')
+    .select('id, fecha')
+    .eq('supervisor_id', currentSupervisor.id)
+    .gte('fecha', inicioMesStr)
+    .lte('fecha', hoyStr)
+    .order('fecha', { ascending: false });
+  
+  const bitacoraIds = (bitacorasMes || []).map(b => b.id);
+  const fechasPorBitacora = {};
+  (bitacorasMes || []).forEach(b => { fechasPorBitacora[b.id] = b.fecha; });
+  
+  let historico = [];
+  if (bitacoraIds.length > 0) {
+    const { data: actsMes } = await sb.from('bitacora_actividad')
+      .select('bitacora_id, estado, comentarios, timestamp_marcado')
+      .in('bitacora_id', bitacoraIds)
+      .eq('actividad_id', cat.id);
+    historico = (actsMes || []).map(a => ({ ...a, fecha: fechasPorBitacora[a.bitacora_id] }));
+    historico.sort((a, b) => b.fecha.localeCompare(a.fecha));
+  }
+  
+  // Contar cumplidos vs totales
+  const totalDias = historico.length;
+  const completados = historico.filter(h => h.estado === 'COMPLETADA').length;
+  const porcentaje = totalDias > 0 ? Math.round(completados / totalDias * 100) : 0;
+  
+  const colorBadge = porcentaje >= 90 ? '#6ee7b7' : porcentaje >= 70 ? '#fbbf24' : '#fca5a5';
+  const bgBadge = porcentaje >= 90 ? 'rgba(16,185,129,0.15)' : porcentaje >= 70 ? 'rgba(245,158,11,0.15)' : 'rgba(239,68,68,0.15)';
+  
+  const mesNombre = ahora.toLocaleDateString('es-MX', { month: 'long' });
+  let cumplimientoHTML = `
+    <div style="background:${bgBadge}; border:1px solid ${colorBadge}; border-radius:10px; padding:12px; margin-bottom:16px;">
+      <p style="font-size:11px; color:rgba(255,255,255,0.6); text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">📊 Cumplimiento de ${mesNombre}</p>
+      <p style="font-size:18px; font-weight:700; color:${colorBadge};">${completados} de ${totalDias} días (${porcentaje}%)</p>
+    </div>
+  `;
+  
+  // Historial de puntos clave (solo para reuniones)
+  let historialHTML = '';
+  if ((cat.codigo === 'REUNION_INICIO' || cat.codigo === 'REUNION_CIERRE') && historico && historico.length > 0) {
+    const conComentarios = historico.filter(h => h.comentarios && h.comentarios.trim());
+    if (conComentarios.length > 0) {
+      historialHTML = `
+        <div style="margin-bottom:16px;">
+          <p style="font-size:12px; font-weight:700; color:rgba(255,255,255,0.7); text-transform:uppercase; letter-spacing:1px; margin-bottom:8px;">📋 Historial de puntos del mes</p>
+          <div style="max-height:200px; overflow-y:auto; background:rgba(0,0,0,0.2); border-radius:8px; padding:10px;">
+            ${conComentarios.slice(0, 15).map(h => {
+              const f = new Date(h.fecha + 'T12:00:00').toLocaleDateString('es-MX', {weekday: 'short', day: '2-digit', month: 'short'});
+              return `<div style="border-left:2px solid rgba(0,168,225,0.4); padding:6px 10px; margin-bottom:6px; background:rgba(255,255,255,0.03); border-radius:4px;">
+                <div style="font-size:11px; color:rgba(255,255,255,0.6); margin-bottom:3px;">📅 ${f}</div>
+                <div style="font-size:12px; color:rgba(255,255,255,0.85); white-space:pre-wrap;">${h.comentarios}</div>
+              </div>`;
+            }).join('')}
+          </div>
+        </div>
+      `;
+    }
+  }
+  
+  document.getElementById('modal-body').innerHTML = `${warning}${cumplimientoHTML}${historialHTML}<p style="margin-bottom:16px; color:rgba(255,255,255,0.8);">Hora actual: <strong>${horaTxt}</strong><br>${act.timestamp_marcado ? `Ya marcaste a las <strong>${new Date(act.timestamp_marcado).toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'})}</strong>` : ''}</p>${extraField}`;
   document.getElementById('modal-actions').innerHTML = `<button class="btn btn-success" onclick="marcarHabito()">${act.timestamp_marcado ? 'Re-marcar' : 'Marcar como hecho ✓'}</button>`;
 }
 
@@ -1360,11 +1425,11 @@ async function renderModalAudios(act, cat) {
     const agentesPresentesHoy = agentesActivos.filter(a => agentesPresentesIds.includes(a.id));
     const hoyLocal = getFechaLocal(new Date());
     
-    // 2. Cargar llamadas seleccionadas (normales + cuelga rápido)
+    // 2. Cargar llamadas seleccionadas (normales + cuelga rápido + improcedentes)
     const { data: llamadasRaw } = await sb.from('tipificacion_diaria')
       .select('*')
       .eq('fecha_cc', fechaAuditar)
-      .or('fue_seleccionado_audio.eq.true,fue_seleccionado_cuelga.eq.true');
+      .or('fue_seleccionado_audio.eq.true,fue_seleccionado_cuelga.eq.true,fue_seleccionado_improcedente.eq.true');
     
     const llamadas = (llamadasRaw || []).filter(l => 
       l.supervisor_nombre && nombresUpper.includes(l.supervisor_nombre.trim().toUpperCase())
@@ -1372,6 +1437,7 @@ async function renderModalAudios(act, cat) {
     
     const llamadasNormales = llamadas.filter(l => l.fue_seleccionado_audio);
     const llamadasCuelga = llamadas.filter(l => l.fue_seleccionado_cuelga);
+    const llamadasImprocedente = llamadas.filter(l => l.fue_seleccionado_improcedente);
     
     // 3. Auditorías ya capturadas
     const { data: audsHoy } = await sb.from('auditoria_audios').select('*').eq('bitacora_actividad_id', act.id);
@@ -1409,7 +1475,7 @@ async function renderModalAudios(act, cat) {
     const total = agentesPresentesHoy.length;
     const correctas = (audsHoy || []).filter(a => a.tipificacion === 'CORRECTA').length;
     const oportunidades = (audsHoy || []).filter(a => a.tipificacion === 'AREAS_OPORTUNIDAD').length;
-    const malas = (audsHoy || []).filter(a => a.tipificacion === 'MALA_LLAMADA' || a.tipificacion === 'CUELGA_RAPIDO').length;
+    const malas = (audsHoy || []).filter(a => a.tipificacion === 'MALA_LLAMADA' || a.tipificacion === 'CUELGA_RAPIDO' || a.tipificacion === 'TIPIF_INCORRECTA').length;
     const sinActividad = (audsHoy || []).filter(a => a.tipificacion === 'SIN_ACTIVIDAD').length;
     
     // Agentes ya con alguna captura hoy
@@ -1430,6 +1496,13 @@ async function renderModalAudios(act, cat) {
       const key = normalizarNombre(l.agente_nombre);
       if (!cuelgaPorAgente[key]) cuelgaPorAgente[key] = [];
       cuelgaPorAgente[key].push(l);
+    });
+    
+    const improcedentePorAgente = {};
+    llamadasImprocedente.forEach(l => {
+      const key = normalizarNombre(l.agente_nombre);
+      if (!improcedentePorAgente[key]) improcedentePorAgente[key] = [];
+      improcedentePorAgente[key].push(l);
     });
     
     // BLOQUE 1: Compromisos pendientes
@@ -1460,16 +1533,20 @@ async function renderModalAudios(act, cat) {
       const nombreUpper = normalizarNombre(agente.nombre);
       const llamadasNorm = normalesPorAgente[nombreUpper] || [];
       const llamadasCue = cuelgaPorAgente[nombreUpper] || [];
+      const llamadasImp = improcedentePorAgente[nombreUpper] || [];
       
       const audDeAgente = (audsHoy || []).filter(a => a.agente_id === agente.id);
       const tieneCaptura = audDeAgente.length > 0;
       const sinActividadCapturado = audDeAgente.find(a => a.tipificacion === 'SIN_ACTIVIDAD');
       
       // Stats por agente
-      const totalCasos = llamadasNorm.length + llamadasCue.length;
+      const totalCasos = llamadasNorm.length + llamadasCue.length + llamadasImp.length;
       const capturadosNorm = llamadasNorm.filter(l => audsMap[l.id]).length;
       const capturadosCue = llamadasCue.filter(l => audsMap[l.id]).length;
-      const totalCapturados = capturadosNorm + capturadosCue;
+      const capturadosImp = llamadasImp.filter(l => audsMap[l.id]).length;
+      const totalCapturados = capturadosNorm + capturadosCue + capturadosImp;
+      
+      const tieneSoloImprocedente = llamadasImp.length > 0 && llamadasNorm.length === 0 && llamadasCue.length === 0;
       
       // Determinar el estado del agente
       let estadoAgenteHTML = '';
@@ -1487,6 +1564,11 @@ async function renderModalAudios(act, cat) {
           bgColor = 'rgba(239,68,68,0.04)';
           borderColor = 'rgba(239,68,68,0.25)';
         }
+      } else if (tieneSoloImprocedente) {
+        // Solo improcedentes - alerta para validar tipificación
+        estadoAgenteHTML = `<span style="background:rgba(245,158,11,0.25); color:#fbbf24; padding:3px 8px; border-radius:6px; font-size:11px;">🔍 Validar tipificación (${totalCapturados}/${totalCasos})</span>`;
+        bgColor = 'rgba(245,158,11,0.04)';
+        borderColor = 'rgba(245,158,11,0.3)';
       } else if (totalCapturados === totalCasos) {
         estadoAgenteHTML = `<span style="background:rgba(16,185,129,0.2); color:#6ee7b7; padding:3px 8px; border-radius:6px; font-size:11px;">✅ Completo (${totalCapturados}/${totalCasos})</span>`;
       } else {
@@ -1501,13 +1583,14 @@ async function renderModalAudios(act, cat) {
           contenidoAgenteHTML = `
             <div style="background:rgba(0,0,0,0.2); padding:8px 10px; border-radius:6px; font-size:12px; color:rgba(255,255,255,0.7);">
               <strong>Hallazgo:</strong> ${sinActividadCapturado.hallazgos || '—'}
-              ${sinActividadCapturado.compromiso ? `<br><strong>Compromiso:</strong> ${sinActividadCapturado.compromiso}` : ''}
+              ${sinActividadCapturado.compromiso ? `<br><strong>Compromiso agente:</strong> ${sinActividadCapturado.compromiso}` : ''}
+              ${sinActividadCapturado.compromiso_supervisor ? `<br><strong>Compromiso supervisor:</strong> ${sinActividadCapturado.compromiso_supervisor}` : ''}
               <button class="btn btn-secondary" style="width:100%; margin-top:8px; font-size:11px; padding:6px;" onclick="abrirSinActividadAudio('${act.id}', '${agente.id}', '${agente.nombre.replace(/'/g, "\\'")}')">✏️ Editar</button>
             </div>`;
         } else {
           contenidoAgenteHTML = `
             <div style="background:rgba(239,68,68,0.06); padding:10px; border-radius:8px;">
-              <p style="font-size:12px; color:rgba(255,255,255,0.7); margin-bottom:8px;">Este agente no tiene llamadas que cumplan los criterios de auditoría. Puede indicar que está colgando llamadas, no llamando lo suficiente, o tipificando mal. <strong>Captura un compromiso para investigar.</strong></p>
+              <p style="font-size:12px; color:rgba(255,255,255,0.7); margin-bottom:8px;">Este agente no tiene llamadas que cumplan los criterios de auditoría ni tampoco improcedentes para validar. <strong>Captura un compromiso para investigar.</strong></p>
               <button class="btn btn-danger" style="width:100%; font-size:12px; padding:8px;" onclick="abrirSinActividadAudio('${act.id}', '${agente.id}', '${agente.nombre.replace(/'/g, "\\'")}')">📝 Capturar compromiso "Sin actividad"</button>
             </div>`;
         }
@@ -1520,6 +1603,15 @@ async function renderModalAudios(act, cat) {
         if (llamadasCue.length > 0) {
           contenidoAgenteHTML += `<div style="font-size:11px; color:#fca5a5; margin-bottom:6px; margin-top:8px; text-transform:uppercase; letter-spacing:0.5px;">⚡ Cuelga rápido (${llamadasCue.length})</div>`;
           contenidoAgenteHTML += llamadasCue.map(l => renderTarjetaLlamadaAudio(l, audsMap[l.id], act.id, 'CUELGA_RAPIDO')).join('');
+        }
+        if (llamadasImp.length > 0) {
+          contenidoAgenteHTML += `
+            <div style="background:rgba(245,158,11,0.06); border:1px solid rgba(245,158,11,0.3); border-radius:8px; padding:10px; margin-top:8px;">
+              <div style="font-size:11px; color:#fbbf24; margin-bottom:4px; text-transform:uppercase; letter-spacing:0.5px;">🔍 Validar tipificación IMPROCEDENTE (${llamadasImp.length})</div>
+              <p style="font-size:11px; color:rgba(255,255,255,0.6); margin-bottom:8px;">Este agente no tiene llamadas con CONTACTO. Revisa si las improcedentes están bien tipificadas o si está evitando trabajar.</p>
+          `;
+          contenidoAgenteHTML += llamadasImp.map(l => renderTarjetaLlamadaAudio(l, audsMap[l.id], act.id, 'IMPROCEDENTE')).join('');
+          contenidoAgenteHTML += `</div>`;
         }
       }
       
@@ -1773,7 +1865,7 @@ function renderTarjetaLlamadaAudio(llamada, aud, actId, tipoAudit) {
     } else if (aud.tipificacion === 'AREAS_OPORTUNIDAD') {
       badge = '<span style="background:rgba(245,158,11,0.2); color:#fbbf24; padding:3px 8px; border-radius:6px; font-size:11px;">⚠️ Oportunidad</span>';
       cardClass = 'background: rgba(245,158,11,0.06); border: 1px solid rgba(245,158,11,0.3);';
-    } else if (aud.tipificacion === 'MALA_LLAMADA' || aud.tipificacion === 'CUELGA_RAPIDO') {
+    } else if (aud.tipificacion === 'MALA_LLAMADA' || aud.tipificacion === 'CUELGA_RAPIDO' || aud.tipificacion === 'TIPIF_INCORRECTA') {
       const col = NIVEL_COLORES[aud.accion_tomada] || NIVEL_COLORES.RETROALIMENTACION;
       badge = `<span style="background:${col.bg}; color:${col.text}; padding:3px 8px; border-radius:6px; font-size:11px;">${col.icon} ${NIVEL_NOMBRES[aud.accion_tomada] || 'Sancionado'}</span>`;
       cardClass = `background: ${col.bg}; border: 1px solid ${col.text};`;
@@ -1845,23 +1937,43 @@ async function renderCapturaAudioModal() {
     }
   }
   
-  // Banner especial si es cuelga rápido
-  const bannerCuelga = tipoAudit === 'CUELGA_RAPIDO' ? `
-    <div style="background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.4); border-radius:10px; padding:12px; margin-bottom:12px;">
-      <p style="font-size:13px; font-weight:600; color:#fca5a5; margin-bottom:4px;">⚡ Llamada cuelga rápido</p>
-      <p style="font-size:11px; color:rgba(255,255,255,0.7);">El agente colgó rápidamente (duración &lt; 10 seg, ACW alto). Si justifica que no debió colgar → aplica sanción (contador separado de mala llamada).</p>
-    </div>
-  ` : '';
+  // Banner especial según tipo
+  let bannerEspecial = '';
+  if (tipoAudit === 'CUELGA_RAPIDO') {
+    bannerEspecial = `
+      <div style="background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.4); border-radius:10px; padding:12px; margin-bottom:12px;">
+        <p style="font-size:13px; font-weight:600; color:#fca5a5; margin-bottom:4px;">⚡ Llamada cuelga rápido</p>
+        <p style="font-size:11px; color:rgba(255,255,255,0.7);">El agente colgó rápidamente (duración &lt; 10 seg, ACW alto). Si justifica que no debió colgar → aplica sanción (contador separado de mala llamada).</p>
+      </div>
+    `;
+  } else if (tipoAudit === 'IMPROCEDENTE') {
+    bannerEspecial = `
+      <div style="background:rgba(245,158,11,0.08); border:1px solid rgba(245,158,11,0.4); border-radius:10px; padding:12px; margin-bottom:12px;">
+        <p style="font-size:13px; font-weight:600; color:#fbbf24; margin-bottom:4px;">🔍 Validar tipificación IMPROCEDENTE</p>
+        <p style="font-size:11px; color:rgba(255,255,255,0.7);">Este agente no tuvo llamadas con CONTACTO. Revisa la grabación: ¿realmente era improcedente o el agente la tipificó así para evitar trabajar?</p>
+      </div>
+    `;
+  }
   
   // Opciones de tipificación según tipo de auditoría
-  const opcionesTipif = tipoAudit === 'CUELGA_RAPIDO' ? `
-    <option value="CORRECTA" ${aud.tipificacion === 'CORRECTA' ? 'selected' : ''}>✅ OK - sí debió colgar (cliente irrelevante, equivocado, etc.)</option>
-    <option value="CUELGA_RAPIDO" ${aud.tipificacion === 'CUELGA_RAPIDO' ? 'selected' : ''}>🚨 NO debió colgar (perdió oportunidad de venta)</option>
-  ` : `
-    <option value="CORRECTA" ${aud.tipificacion === 'CORRECTA' ? 'selected' : ''}>✅ Llamada correcta</option>
-    <option value="AREAS_OPORTUNIDAD" ${aud.tipificacion === 'AREAS_OPORTUNIDAD' ? 'selected' : ''}>⚠️ Áreas de oportunidad</option>
-    <option value="MALA_LLAMADA" ${aud.tipificacion === 'MALA_LLAMADA' ? 'selected' : ''}>🚨 Mala llamada</option>
-  `;
+  let opcionesTipif;
+  if (tipoAudit === 'CUELGA_RAPIDO') {
+    opcionesTipif = `
+      <option value="CORRECTA" ${aud.tipificacion === 'CORRECTA' ? 'selected' : ''}>✅ OK - sí debió colgar (cliente irrelevante, equivocado, etc.)</option>
+      <option value="CUELGA_RAPIDO" ${aud.tipificacion === 'CUELGA_RAPIDO' ? 'selected' : ''}>🚨 NO debió colgar (perdió oportunidad de venta)</option>
+    `;
+  } else if (tipoAudit === 'IMPROCEDENTE') {
+    opcionesTipif = `
+      <option value="CORRECTA" ${aud.tipificacion === 'CORRECTA' ? 'selected' : ''}>✅ Bien tipificado (sí era improcedente)</option>
+      <option value="TIPIF_INCORRECTA" ${aud.tipificacion === 'TIPIF_INCORRECTA' ? 'selected' : ''}>🚨 Mal tipificado (debió ser CONTACTO)</option>
+    `;
+  } else {
+    opcionesTipif = `
+      <option value="CORRECTA" ${aud.tipificacion === 'CORRECTA' ? 'selected' : ''}>✅ Llamada correcta</option>
+      <option value="AREAS_OPORTUNIDAD" ${aud.tipificacion === 'AREAS_OPORTUNIDAD' ? 'selected' : ''}>⚠️ Áreas de oportunidad</option>
+      <option value="MALA_LLAMADA" ${aud.tipificacion === 'MALA_LLAMADA' ? 'selected' : ''}>🚨 Mala llamada</option>
+    `;
+  }
   
   document.getElementById('modal-body').innerHTML = `
     <div style="background:rgba(0,168,225,0.08); border:1px solid rgba(0,168,225,0.3); border-radius:10px; padding:12px; margin-bottom:16px;">
@@ -1871,7 +1983,7 @@ async function renderCapturaAudioModal() {
       <div style="font-size:11px; color:rgba(255,255,255,0.5);">Calificación CC: ${llamada.calificacion_cc || '—'}</div>
     </div>
     
-    ${bannerCuelga}
+    ${bannerEspecial}
     ${antecedentesHTML}
     
     <div class="form-group">
@@ -1931,10 +2043,12 @@ async function onCambioTipAudio() {
   const sancionInfo = document.getElementById('aud-sancion-info-call');
   
   if (compromisoBlock) compromisoBlock.style.display = tip === 'AREAS_OPORTUNIDAD' ? 'block' : 'none';
-  if (malaBlock) malaBlock.style.display = (tip === 'MALA_LLAMADA' || tip === 'CUELGA_RAPIDO') ? 'block' : 'none';
+  const requiereSancion = (tip === 'MALA_LLAMADA' || tip === 'CUELGA_RAPIDO' || tip === 'TIPIF_INCORRECTA');
+  if (malaBlock) malaBlock.style.display = requiereSancion ? 'block' : 'none';
   
-  if ((tip === 'MALA_LLAMADA' || tip === 'CUELGA_RAPIDO') && capturaAudioContext.agente_id) {
+  if (requiereSancion && capturaAudioContext.agente_id) {
     const hoyLocal = getFechaLocal(new Date());
+    // CUELGA_RAPIDO usa contador propio; TIPIF_INCORRECTA y MALA_LLAMADA comparten contador NORMAL
     const tipoBuscar = tip === 'CUELGA_RAPIDO' ? 'CUELGA_RAPIDO' : 'NORMAL';
     
     const { data: todasFallasA } = await sb.from('auditoria_audios')
@@ -1956,7 +2070,9 @@ async function onCambioTipAudio() {
       const sancion = result?.[0];
       if (sancion) {
         const col = NIVEL_COLORES[sancion.siguiente_accion];
-        const tipoTxt = tip === 'CUELGA_RAPIDO' ? 'cuelga rápido' : 'malas llamadas';
+        let tipoTxt = 'malas llamadas';
+        if (tip === 'CUELGA_RAPIDO') tipoTxt = 'cuelga rápido';
+        else if (tip === 'TIPIF_INCORRECTA') tipoTxt = 'fallas (incluye tipif. incorrecta)';
         const numField = sancion.num_dia_falla || sancion.num_mala_llamada || sancion.num_falla;
         sancionInfo.innerHTML = `
           <div style="background:${col.bg}; border:1px solid ${col.text}; border-radius:8px; padding:14px; margin-bottom:12px;">
@@ -2006,8 +2122,9 @@ async function guardarCapturaAudio() {
     payload.fecha_verificacion = fechaVerif;
   }
   
-  if ((tipificacion === 'MALA_LLAMADA' || tipificacion === 'CUELGA_RAPIDO') && ctx.agente_id) {
+  if ((tipificacion === 'MALA_LLAMADA' || tipificacion === 'CUELGA_RAPIDO' || tipificacion === 'TIPIF_INCORRECTA') && ctx.agente_id) {
     const hoyLocal = getFechaLocal(new Date());
+    // CUELGA_RAPIDO usa contador propio; TIPIF_INCORRECTA usa contador NORMAL (mismo que mala llamada)
     const tipoBuscar = tipificacion === 'CUELGA_RAPIDO' ? 'CUELGA_RAPIDO' : 'NORMAL';
     
     const { data: todasFallasA } = await sb.from('auditoria_audios')
@@ -3603,6 +3720,11 @@ async function capturarSinActividad(agenteId, agenteNombre, tipo, actId, dias, f
       <textarea id="sa-compromiso" rows="3" placeholder="Qué se compromete a hacer hoy/mañana para revertir...">${cap.compromiso || ''}</textarea>
     </div>
     
+    <div class="form-group">
+      <label>📋 Compromiso del supervisor (acompañamiento)</label>
+      <textarea id="sa-compromiso-sup" rows="2" placeholder="Cómo apoyarás al agente: roleplay, monitoreo, capacitación, etc.">${cap.compromiso_supervisor || ''}</textarea>
+    </div>
+    
     <div style="background:rgba(0,168,225,0.06); border:1px solid rgba(0,168,225,0.3); border-radius:8px; padding:10px; margin-bottom:12px;">
       <p style="font-size:11px; color:rgba(255,255,255,0.7);">📅 Mañana el sistema verificará si el agente ya ${labels.verbo_pasado}. Si no, revisará sus auditorías de ayer y aplicará sanción si fueron negativas.</p>
     </div>
@@ -3618,6 +3740,7 @@ async function guardarSinActividad() {
   const ctx = capturaSinActContext;
   const causa = document.getElementById('sa-causa').value;
   const compromiso = document.getElementById('sa-compromiso').value.trim();
+  const compromisoSup = (document.getElementById('sa-compromiso-sup')?.value || '').trim();
   
   if (!causa) { alert('Selecciona la causa raíz'); return; }
   if (!compromiso) { alert('Captura el compromiso/plan de acción'); return; }
@@ -3637,6 +3760,7 @@ async function guardarSinActividad() {
     dias_sin_actividad: ctx.dias,
     fecha_ultima_actividad: ctx.fechaUltima || null,
     compromiso: compromiso,
+    compromiso_supervisor: compromisoSup || null,
     causa_raiz: causa,
     fecha_verificacion: fechaVerif,
     estado: 'ACTIVA'
